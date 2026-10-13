@@ -1,0 +1,14 @@
+[package]
+name = "ppk-diamond"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pumpkin-plugin-api = "0.2.0"
+tracing = "0.1.44"
+
+[lib] 
+crate-type = ["cdylib"]
+
+[profile.release] 
+lto = true
