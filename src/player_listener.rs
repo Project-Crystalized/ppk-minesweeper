@@ -3,6 +3,7 @@ use pumpkin_plugin_api::{
     common::Hand,
     events::{EventData, EventHandler, InteractAction, PlayerInteractEvent, PlayerJoinEvent},
     text::TextComponent,
+    wit::pumpkin::plugin::status_effect::{StatusEffectInstance, StatusEffectType},
 };
 
 pub struct JoinEventListener;
@@ -39,7 +40,18 @@ impl EventHandler<PlayerInteractEvent> for InteractEventListener {
         });
 
         if is_right_click && is_holding_diamond {
-            // my code will go here for when a player right clicks with a diamond
+            if event.player.has_item_cooldown("minecraft:diamond") {
+                return event;
+            }
+            event.player.add_effect(StatusEffectInstance {
+                effect_type: StatusEffectType::Speed,
+                duration: 200,
+                amplifier: 2,
+                ambient: false,
+                show_particles: true,
+                show_icon: true,
+            });
+            event.player.set_item_cooldown("minecraft:diamond", 100);
         }
         event
     }
