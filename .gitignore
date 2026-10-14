@@ -1,1 +1,7 @@
 /target
+# Pumpkin server runtime files (created when the server binary
+# is launched from this directory by accident)
+/data/
+/logs/
+/world/
+/pumpkin.toml

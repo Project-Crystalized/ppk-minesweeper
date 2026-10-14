@@ -182,7 +182,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ppk-diamond"
+name = "ppk-minesweeper"
 version = "0.1.0"
 dependencies = [
  "pumpkin-plugin-api",

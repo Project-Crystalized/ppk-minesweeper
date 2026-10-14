@@ -1,0 +1,41 @@
+[package]
+name = "minesweeper"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+itertools = "0.12.0"
+rand = "0.8.5"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+valence = { git = "https://github.com/valence-rs/valence", rev = "a2efd58fea3a585ee5f5961456d505983735c02d" }
+mampfer-plugin = { path = "../../mampfer-plugin"}
+noise = "0.8.2"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+strip = true
+
+[lib]
+name = "minesweeper_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minesweeper2d"
+path = "src/bin/minesweeper2d.rs"
+
+[[bin]]
+name = "minesweeper3d"
+path = "src/bin/minesweeper3d.rs"
+
+[[bin]]
+name = "infinite_sweeper"
+path = "src/bin/infinite_sweeper.rs"
+
+[[bin]]
+name = "test"
+path = "src/bin/test.rs"
