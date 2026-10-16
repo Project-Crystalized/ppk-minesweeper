@@ -34,6 +34,13 @@ pub struct GameInstance {
     pub dim: usize,
     pub board: Vec<Cell>,
     pub owner: UuidKey,
+    /// Helpers who opened cells (for credit); unlike the owner they do NOT
+    /// bypass `locked`.
+    pub helpers: Vec<UuidKey>,
+    /// When true, only the owner may click/flag this game.
+    pub locked: bool,
+    /// Set once the finished game has been written to SQLite.
+    pub recorded: bool,
     pub world_id: String,
     pub comp_time_ticks: u64,
     pub is_over: bool,
@@ -60,6 +67,21 @@ impl GameInstance {
     /// Index of the cell at `pos`, if this game owns it.
     pub fn find_cell(&self, pos: Pos3) -> Option<usize> {
         self.board.iter().position(|c| c.pos == pos)
+    }
+
+    /// Middle cell of the board, used as the action-bar proximity anchor
+    /// (mirrors the old `ActionState.center`).
+    pub fn center(&self) -> Pos3 {
+        self.board
+            .get(self.board.len() / 2)
+            .map(|c| c.pos)
+            .unwrap_or_default()
+    }
+
+    /// True when `who` may click/flag: owner always, anyone else only when
+    /// unlocked (helpers do not bypass the lock, same as the old server).
+    pub fn is_allowed(&self, who: UuidKey) -> bool {
+        who == self.owner || !self.locked
     }
 }
 
@@ -188,6 +210,7 @@ pub fn player_game_count(owner: UuidKey) -> usize {
     lock().games.values().filter(|g| g.owner == owner).count()
 }
 
+#[allow(dead_code)]
 pub fn player_games(owner: UuidKey) -> Vec<u32> {
     lock()
         .games
@@ -236,6 +259,133 @@ pub fn all_games_snapshot() -> Vec<(u32, UuidKey, String, u64, usize, usize, boo
         .collect()
 }
 
+/// Extended snapshot for `/ms list` and the tick action bar: includes kind,
+/// dim, lock state and helper count.
+pub struct GameSummary {
+    pub id: u32,
+    pub owner: UuidKey,
+    pub world_id: String,
+    pub kind: GameKind,
+    pub dim: usize,
+    pub ticks: u64,
+    pub bombs: usize,
+    pub flags: usize,
+    pub over: bool,
+    pub won: bool,
+    pub locked: bool,
+    pub helpers: usize,
+    pub center: Pos3,
+}
+
+pub fn all_games_detailed() -> Vec<GameSummary> {
+    lock()
+        .games
+        .iter()
+        .map(|(id, g)| GameSummary {
+            id: *id,
+            owner: g.owner,
+            world_id: g.world_id.clone(),
+            kind: g.kind,
+            dim: g.dim,
+            ticks: g.comp_time_ticks,
+            bombs: g.bomb_total(),
+            flags: g.flag_count(),
+            over: g.is_over,
+            won: g.is_won,
+            locked: g.locked,
+            helpers: g.helpers.len(),
+            center: g.center(),
+        })
+        .collect()
+}
+
+/// Record `who` as a helper of game `id` (no-op for the owner or dupes).
+#[allow(dead_code)]
+pub fn add_helper(id: u32, who: UuidKey) {
+    if let Some(game) = lock().games.get_mut(&id) {
+        if who != game.owner && !game.helpers.contains(&who) {
+            game.helpers.push(who);
+        }
+    }
+}
+
+/// Toggle the lock on one game. Only the owner may do this.
+/// Returns the new state, or `None` if the game is missing / not owned.
+pub fn toggle_lock(id: u32, who: UuidKey) -> Option<bool> {
+    let mut s = lock();
+    let game = s.games.get_mut(&id)?;
+    if game.owner != who {
+        return None;
+    }
+    game.locked = !game.locked;
+    Some(game.locked)
+}
+
+/// Toggle all games owned by `who`. Returns `(toggled, now_locked)`.
+/// `now_locked` is the state after toggling when at least one game exists;
+/// all games end up in the same state (lock if any unlocked, else unlock).
+pub fn toggle_all_locks(who: UuidKey) -> (usize, bool) {
+    let mut s = lock();
+    let mut owned: Vec<&mut GameInstance> = s.games.values_mut().filter(|g| g.owner == who).collect();
+    if owned.is_empty() {
+        return (0, false);
+    }
+    let target = owned.iter().any(|g| !g.locked);
+    for g in &mut owned {
+        g.locked = target;
+    }
+    (owned.len(), target)
+}
+
+// ---------------------------------------------------------------------------
+// Per-player flag color (mirrors old Valence `FlagType`, slot 44 cycling
+// RED -> ORANGE -> YELLOW -> CYAN -> BLUE).
+// ---------------------------------------------------------------------------
+
+/// (wool item/block suffix, full block name) in cycle order.
+pub const FLAG_STYLE_ORDER: [(&str, &str); 5] = [
+    ("red", "minecraft:red_wool"),
+    ("orange", "minecraft:orange_wool"),
+    ("yellow", "minecraft:yellow_wool"),
+    ("cyan", "minecraft:cyan_wool"),
+    ("blue", "minecraft:blue_wool"),
+];
+
+fn flag_styles() -> &'static Mutex<HashMap<UuidKey, usize>> {
+    static STYLES: OnceLock<Mutex<HashMap<UuidKey, usize>>> = OnceLock::new();
+    STYLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Full block name of `owner`'s current flag style (defaults to red wool).
+pub fn flag_block_for(owner: UuidKey) -> &'static str {
+    let idx = flag_styles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&owner)
+        .copied()
+        .unwrap_or(0);
+    FLAG_STYLE_ORDER[idx % FLAG_STYLE_ORDER.len()].1
+}
+
+/// Cycle `owner` to the next flag color. Returns the new block name.
+pub fn cycle_flag_style(owner: UuidKey) -> &'static str {
+    let mut s = flag_styles().lock().unwrap_or_else(|e| e.into_inner());
+    let next = s.get(&owner).copied().unwrap_or(0) + 1;
+    s.insert(owner, next % FLAG_STYLE_ORDER.len());
+    FLAG_STYLE_ORDER[next % FLAG_STYLE_ORDER.len()].1
+}
+
+/// Short color name ("red", "orange", ...) for item names and messages.
+pub fn flag_style_name(owner: UuidKey) -> &'static str {
+    let idx = flag_styles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&owner)
+        .copied()
+        .unwrap_or(0);
+    FLAG_STYLE_ORDER[idx % FLAG_STYLE_ORDER.len()].0
+}
+
 // ---------------------------------------------------------------------------
 // Infinite-mode sessions (in-memory only, per the no-persistence decision)
 // ---------------------------------------------------------------------------
@@ -273,4 +423,126 @@ fn boards() -> &'static Mutex<HashMap<String, InfiniteBoard>> {
 pub fn with_infinite_board_mut<R>(world_id: &str, f: impl FnOnce(&mut InfiniteBoard) -> R) -> R {
     let mut b = boards().lock().unwrap_or_else(|e| e.into_inner());
     f(b.entry(world_id.to_string()).or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{CellContent, CellState, Cell};
+
+    fn mk_game(owner: UuidKey, x0: i32, locked: bool) -> GameInstance {
+        let cells = vec![
+            Cell {
+                content: CellContent::Empty,
+                state: CellState::Closed,
+                pos: Pos3::new(x0, 100, 9001),
+            },
+            Cell {
+                content: CellContent::Empty,
+                state: CellState::Closed,
+                pos: Pos3::new(x0 + 1, 100, 9001),
+            },
+        ];
+        GameInstance {
+            kind: GameKind::TwoD,
+            dim: 2,
+            board: cells,
+            owner,
+            helpers: Vec::new(),
+            locked,
+            recorded: false,
+            world_id: "test_world".to_string(),
+            comp_time_ticks: 0,
+            is_over: false,
+            is_won: false,
+        }
+    }
+
+    #[test]
+    fn lifecycle_routes_cells_and_cleans_up() {
+        let owner = (0xAAA1_0001, 0xBBB1_0001);
+        let id = insert_game(mk_game(owner, 50_001, false));
+        assert_eq!(game_id_at(50_001, 100, 9001), Some(id));
+        assert_eq!(game_id_at(50_002, 100, 9001), Some(id));
+        assert_eq!(game_id_at(50_003, 100, 9001), None);
+        // Removal unindexes every cell: no ghost clicks afterwards.
+        remove_game(id);
+        assert_eq!(game_id_at(50_001, 100, 9001), None);
+    }
+
+    #[test]
+    fn locks_are_owner_only() {
+        let owner = (0xAAA1_0002, 0xBBB1_0002);
+        let stranger = (0xCC01_0002, 0xDD01_0002);
+        let id = insert_game(mk_game(owner, 50_011, false));
+        assert!(!with_game(id, |g| g.locked).unwrap());
+        assert!(with_game(id, |g| g.is_allowed(stranger)).unwrap());
+        // Stranger cannot flip the lock.
+        assert_eq!(toggle_lock(id, stranger), None);
+        assert_eq!(toggle_lock(id, owner), Some(true));
+        assert!(!with_game(id, |g| g.is_allowed(stranger)).unwrap());
+        assert!(with_game(id, |g| g.is_allowed(owner)).unwrap());
+        assert_eq!(toggle_lock(id, owner), Some(false));
+        assert_eq!(toggle_lock(0xFFFF_FFFE, owner), None);
+        remove_game(id);
+    }
+
+    #[test]
+    fn toggle_all_converges_to_one_state() {
+        let owner = (0xAAA1_0003, 0xBBB1_0003);
+        let a = insert_game(mk_game(owner, 50_021, false));
+        let b = insert_game(mk_game(owner, 50_031, false));
+        toggle_lock(a, owner);
+        let (n, locked) = toggle_all_locks(owner);
+        assert_eq!((n, locked), (2, true));
+        let (n, locked) = toggle_all_locks(owner);
+        assert_eq!((n, locked), (2, false));
+        assert_eq!(toggle_all_locks((9, 9)), (0, false));
+        remove_game(a);
+        remove_game(b);
+    }
+
+    #[test]
+    fn flag_styles_cycle_five_and_wrap() {
+        let owner = (0xAAA1_0004, 0xBBB1_0004);
+        assert_eq!(flag_block_for(owner), "minecraft:red_wool");
+        assert_eq!(flag_style_name(owner), "red");
+        let expected = ["orange", "yellow", "cyan", "blue", "red"];
+        for name in expected {
+            cycle_flag_style(owner);
+            assert_eq!(flag_style_name(owner), name);
+        }
+        assert_eq!(flag_block_for(owner), "minecraft:red_wool");
+    }
+
+    #[test]
+    fn flag_debounce_locks_then_expires() {
+        let now = now_tick();
+        let id = 999_981u32;
+        let idx = 3usize;
+        assert!(!flag_locked(id, idx, now));
+        lock_flag(id, idx, now + FLAG_LOCK_TICKS);
+        assert!(flag_locked(id, idx, now));
+        // Expiry is strict: at exactly `until` the lock is gone.
+        assert!(!flag_locked(id, idx, now + FLAG_LOCK_TICKS));
+        prune_flag_locks(now + FLAG_LOCK_TICKS + 1);
+        assert!(!flag_locked(id, idx, now));
+
+        let world = "test_flag_world_expire";
+        assert!(!infinite_flag_locked(world, 7, 8, now));
+        lock_infinite_flag(world, 7, 8, now + FLAG_LOCK_TICKS);
+        assert!(infinite_flag_locked(world, 7, 8, now));
+        assert!(!infinite_flag_locked(world, 7, 8, now + FLAG_LOCK_TICKS));
+    }
+
+    #[test]
+    fn infinite_session_and_board_start_empty() {
+        let owner = (0xAAA1_0005, 0xBBB1_0005);
+        with_session_mut(owner, |s| {
+            assert_eq!((s.current_streak, s.top_streak, s.total_opened, s.total_bombs), (0, 0, 0, 0));
+        });
+        with_infinite_board_mut("test_board_empty", |b| {
+            assert!(b.cells.is_empty());
+        });
+    }
 }

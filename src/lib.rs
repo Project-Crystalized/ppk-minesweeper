@@ -11,6 +11,7 @@ use tracing::*;
 
 mod commands;
 mod core;
+mod db;
 mod games;
 mod helpers;
 mod infinite;
@@ -33,12 +34,17 @@ impl Plugin for MinesweeperPlugin {
             authors: vec!["cooltexture1".into()],
             description: "2D, 3D and infinite minesweeper in survival worlds".into(),
             dependencies: vec![],
-            permissions: vec![],
+            // Host capability for the SQLite file in the data folder.
+            permissions: vec!["fs.write.data".to_string()],
         }
     }
 
     fn on_load(&self, context: Context) -> pumpkin_plugin_api::Result<()> {
         info!("Minesweeper loading");
+
+        // SQLite records (fail-soft: the game runs without them).
+        // Needs the `fs.write.data` manifest permission for `data/`.
+        crate::db::setup();
 
         infinite::register_generator();
 
@@ -86,6 +92,10 @@ impl Plugin for MinesweeperPlugin {
         let cmd = Command::new(&["ms".to_string()], "Play minesweeper")
             .then(CommandNode::literal("help").execute(commands::HelpCommand))
             .then(
+                CommandNode::literal("2d20")
+                    .execute(commands::NewGameCommand { spec: Spec::TWO_D_20 }),
+            )
+            .then(
                 CommandNode::literal("2d30")
                     .execute(commands::NewGameCommand { spec: Spec::TWO_D_30 }),
             )
@@ -105,6 +115,10 @@ impl Plugin for MinesweeperPlugin {
                 CommandNode::literal("3d7")
                     .execute(commands::NewGameCommand { spec: Spec::THREE_D_7 }),
             )
+            .then(
+                CommandNode::literal("3d10")
+                    .execute(commands::NewGameCommand { spec: Spec::THREE_D_10 }),
+            )
             .then(CommandNode::literal("3d").then(
                 CommandNode::argument("size", &ArgumentType::Integer((None, None)))
                     .execute(commands::NewGame3dCommand),
@@ -112,6 +126,17 @@ impl Plugin for MinesweeperPlugin {
             .then(CommandNode::literal("clear").execute(commands::ClearCommand))
             .then(CommandNode::literal("list").execute(commands::ListCommand))
             .then(CommandNode::literal("kit").execute(commands::KitCommand))
+            .then(
+                CommandNode::literal("lock")
+                    .then(
+                        CommandNode::argument("id", &ArgumentType::Integer((None, None)))
+                            .execute(commands::LockCommand),
+                    )
+                    .execute(commands::LockCommand),
+            )
+            .then(CommandNode::literal("flag").execute(commands::FlagCommand))
+            .then(CommandNode::literal("stats").execute(commands::StatsCommand))
+            .then(CommandNode::literal("top").execute(commands::TopCommand))
             .then(CommandNode::literal("infinite").execute(commands::InfiniteCommand))
             .execute(commands::RootCommand);
         if let Err(e) = context.register_permission(&Permission {

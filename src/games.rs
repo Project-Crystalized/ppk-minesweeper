@@ -6,7 +6,7 @@ use crate::{
     core::{
         self, adjacent_2d, adjacent_3d, bomb_amount_2d, bomb_amount_3d, generate_board_2d,
         generate_board_3d, is_won, revealed_block_name, CellContent, CellState, Pos3, TinyRng,
-        AIR_BLOCK, COVERED_BLOCK, FLAG_BLOCK,
+        AIR_BLOCK, COVERED_BLOCK,
     },
     helpers::{self, is_air, play_sound, set_block, tell, Sound},
     state::{
@@ -22,6 +22,10 @@ pub struct NewGameSpec {
 }
 
 impl NewGameSpec {
+    pub const TWO_D_20: Self = Self {
+        kind: GameKind::TwoD,
+        dim: 20,
+    };
     pub const TWO_D_30: Self = Self {
         kind: GameKind::TwoD,
         dim: 30,
@@ -37,6 +41,10 @@ impl NewGameSpec {
     pub const THREE_D_7: Self = Self {
         kind: GameKind::ThreeD,
         dim: 7,
+    };
+    pub const THREE_D_10: Self = Self {
+        kind: GameKind::ThreeD,
+        dim: 10,
     };
 
     /// Custom sizes from `/ms 2d|3d <size>`: any dimension >= 2.
@@ -54,7 +62,7 @@ impl NewGameSpec {
     }
 
     pub fn all_labels() -> &'static str {
-        "2d30, 2d50, 3d5, 3d7, or /ms 2d <size> / 3d <size> (2+)"
+        "2d20, 2d30, 2d50, 3d5, 3d7, 3d10, or /ms 2d <size> / 3d <size> (2+)"
     }
 }
 
@@ -157,6 +165,9 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
         dim,
         board,
         owner,
+        helpers: Vec::new(),
+        locked: false,
+        recorded: false,
         world_id,
         comp_time_ticks: 0,
         is_over: false,
@@ -185,16 +196,18 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
     );
 }
 
-pub fn clear_player_games(player: &Player) {
+pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) {
     let owner = helpers::uuid_key(player);
-    let world = player.get_world();
     let mut n = 0;
     for game in state::remove_player_games(owner) {
-        clear_blocks(&world, &game);
+        // Each game may live in a different world: resolve it by id so no
+        // blocks leak and we never wipe the player's current world by mistake.
+        match server.get_world_by_name(&game.world_id) {
+            Some(world) => clear_blocks(&world, &game),
+            None => clear_blocks(&player.get_world(), &game),
+        }
         n += 1;
     }
-    // Also clear games whose world differs (best effort via server lookup is
-    // handled by the caller passing the right player; here we just report).
     tell(player, &format!("Cleared {n} game(s)."));
 }
 
@@ -272,9 +285,72 @@ fn open_cell_3d(world: &World, game: &mut GameInstance, start: (usize, usize, us
     }
 }
 
-/// Left-click (block break) on a board cell. Returns true if the click
-/// belonged to a game (caller should cancel the break event).
-pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
+/// Pure click-guard decision shared by `click_left`/`click_right`, kept
+/// World-free so unit tests can cover the exact bug classes (flagged cells
+/// exploding, locked games leaking clicks) without a live server.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClickDecision {
+    Proceed,
+    Ignore,
+    DenyLocked,
+}
+
+/// Left-click guard: only `Closed` cells of unlocked (or owned) live games
+/// react. Out-of-bounds indices are ignored defensively.
+pub fn decide_left(
+    game: &GameInstance,
+    who: crate::state::UuidKey,
+    idx: usize,
+) -> ClickDecision {
+    if game.is_over {
+        return ClickDecision::Ignore;
+    }
+    if !game.is_allowed(who) {
+        return ClickDecision::DenyLocked;
+    }
+    match game.board.get(idx) {
+        Some(cell) if cell.state == CellState::Closed => ClickDecision::Proceed,
+        _ => ClickDecision::Ignore,
+    }
+}
+
+/// Right-click guard: `Closed` (flag) and `Flagged` (unflag) cells react,
+/// `Opened` cells are swallowed.
+pub fn decide_right(
+    game: &GameInstance,
+    who: crate::state::UuidKey,
+    idx: usize,
+) -> ClickDecision {
+    if game.is_over {
+        return ClickDecision::Ignore;
+    }
+    if !game.is_allowed(who) {
+        return ClickDecision::DenyLocked;
+    }
+    match game.board.get(idx) {
+        Some(cell) if cell.state != CellState::Opened => ClickDecision::Proceed,
+        _ => ClickDecision::Ignore,
+    }
+}
+
+/// Pure first-click condition: the board is untouched and the clicked cell is
+/// not empty, so the board must be regenerated before opening.
+pub fn needs_first_click_reshuffle(board: &[core::Cell], idx: usize) -> bool {
+    core::all_closed(board)
+        && board
+            .get(idx)
+            .is_some_and(|c| c.content != CellContent::Empty)
+}
+/// Left-click (block break) on a board cell. Always returns true: the click
+/// belonged to a game, so the caller must cancel the break event even when
+/// the click itself was a no-op (flagged cell, already open, locked game).
+pub fn click_left(
+    world: &World,
+    server: &pumpkin_plugin_api::Server,
+    player: &Player,
+    id: u32,
+    idx: usize,
+) -> bool {
     let owner = helpers::uuid_key(player);
     // Owner clicking after game over despawns the game.
     let over_owned = state::with_game(id, |g| g.is_over && g.owner == owner).unwrap_or(false);
@@ -288,13 +364,17 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
         tell(player, "Game cleared. Start a new one with /ms.");
         return true;
     }
-    state::with_game_mut(id, |game| {
-        if game.is_over {
-            return false;
+    // Lock / state guards run inside one mutation so the checks see a
+    // consistent board. Every early exit still returns true (swallow click).
+    let outcome = state::with_game_mut(id, |game| {
+        match decide_left(game, owner, idx) {
+            ClickDecision::Ignore => return Outcome::Swallowed,
+            ClickDecision::DenyLocked => return Outcome::Locked,
+            ClickDecision::Proceed => {}
         }
         // First-click protection (mirrors the old regenerate_if_not_empty):
         // never let the opening click be a bomb or a number.
-        if core::all_closed(&game.board) && game.board[idx].content != CellContent::Empty {
+        if needs_first_click_reshuffle(&game.board, idx) {
             let origin = game.board.first().map(|c| c.pos).unwrap_or_default();
             let mut seed = state::next_rng_seed(game.owner);
             for _ in 0..64 {
@@ -314,6 +394,9 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
                 }
             }
         }
+        if owner != game.owner && !game.helpers.contains(&owner) {
+            game.helpers.push(owner);
+        }
         match game.board[idx].content {
             CellContent::Bomb => {
                 let pos = game.board[idx].pos;
@@ -321,7 +404,7 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
                 reveal_all(world, game);
                 game.is_over = true;
                 game.is_won = false;
-                true
+                Outcome::Played
             }
             CellContent::Empty => {
                 let cell_pos = game.board[idx].pos;
@@ -336,7 +419,7 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
                     game.is_over = true;
                     game.is_won = true;
                 }
-                true
+                Outcome::Played
             }
             CellContent::Number(_) => {
                 let pos = game.board[idx].pos;
@@ -348,11 +431,74 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
                     game.is_over = true;
                     game.is_won = true;
                 }
-                true
+                Outcome::Played
             }
         }
-    })
-    .unwrap_or(false)
+    });
+    match outcome {
+        Some(Outcome::Locked) => {
+            tell(player, "That game is locked by its owner.");
+            true
+        }
+        // Swallowed / played / missing game: always consume so the underlying
+        // moss block is never actually broken.
+        _ => {
+            maybe_record_finished_game(server, player, id);
+            true
+        }
+    }
+}
+
+/// Persist a game that just ended (win or loss), exactly once. Retries on
+/// later clicks until the write succeeds, so a transient DB failure loses
+/// nothing (the `recorded` flag only flips on success).
+fn maybe_record_finished_game(server: &pumpkin_plugin_api::Server, clicker: &Player, id: u32) {
+    let snap = state::with_game(id, |g| {
+        (
+            g.kind,
+            g.dim,
+            g.comp_time_ticks,
+            g.is_over,
+            g.is_won,
+            g.owner,
+            g.helpers.clone(),
+            g.recorded,
+        )
+    });
+    let Some((kind, dim, ticks, over, won, owner, helpers, recorded)) = snap else {
+        return;
+    };
+    if !over || recorded {
+        return;
+    }
+    let online: Vec<(crate::state::UuidKey, String)> = server
+        .get_all_players()
+        .iter()
+        .map(|p| (helpers::uuid_key(p), p.get_name()))
+        .collect();
+    let name_of = |u: crate::state::UuidKey| {
+        if u == helpers::uuid_key(clicker) {
+            return clicker.get_name();
+        }
+        online
+            .iter()
+            .find(|(k, _)| *k == u)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| "?".to_string())
+    };
+    let mode = match kind {
+        GameKind::TwoD => "2D",
+        GameKind::ThreeD => "3D",
+    };
+    if crate::db::record_box_game(dim, mode, ticks, won, owner, &name_of(owner), &helpers) {
+        state::with_game_mut(id, |g| g.recorded = true);
+    }
+}
+
+enum Outcome {
+    Played,
+    Swallowed,
+    Locked,
 }
 
 fn locate(game: &GameInstance, idx: usize) -> (usize, usize, usize) {
@@ -372,16 +518,23 @@ fn locate(game: &GameInstance, idx: usize) -> (usize, usize, usize) {
 }
 
 /// Right-click (interact) flag toggle, applied synchronously.
-/// Returns true when the click was consumed (toggled or spam-swallowed).
-pub fn click_right(world: &World, id: u32, idx: usize) -> bool {
-    state::with_game_mut(id, |game| {
-        if game.is_over {
-            return false;
+/// Always returns true when the position belongs to a game: toggled,
+/// spam-swallowed, locked, or already-open clicks are all consumed so the
+/// vanilla interact never places/uses a block. Uses the clicking player's
+/// own flag color (slot-44 cycling, red wool default).
+pub fn click_right(world: &World, player: &Player, id: u32, idx: usize) -> bool {
+    let who = helpers::uuid_key(player);
+    let outcome = state::with_game_mut(id, |game| {
+        match decide_right(game, who, idx) {
+            ClickDecision::Ignore => return Outcome::Swallowed,
+            ClickDecision::DenyLocked => return Outcome::Locked,
+            ClickDecision::Proceed => {}
         }
         let now = state::now_tick();
         if state::flag_locked(id, idx, now) {
-            return true;
+            return Outcome::Swallowed;
         }
+        // `decide_right` already proved `idx` is in bounds and not opened.
         let cell = &mut game.board[idx];
         let (flagged, pos) = match cell.state {
             CellState::Closed => {
@@ -392,10 +545,11 @@ pub fn click_right(world: &World, id: u32, idx: usize) -> bool {
                 cell.state = CellState::Closed;
                 (false, cell.pos)
             }
-            CellState::Opened => return false,
+            CellState::Opened => return Outcome::Swallowed,
         };
         state::lock_flag(id, idx, now + FLAG_LOCK_TICKS);
-        set_block(world, pos, if flagged { FLAG_BLOCK } else { COVERED_BLOCK });
+        let flag_block = state::flag_block_for(who);
+        set_block(world, pos, if flagged { flag_block } else { COVERED_BLOCK });
         play_sound(
             world,
             pos,
@@ -405,15 +559,21 @@ pub fn click_right(world: &World, id: u32, idx: usize) -> bool {
                 Sound::BlockWoolBreak
             },
         );
-        true
-    })
-    .unwrap_or(false)
+        Outcome::Played
+    });
+    match outcome {
+        Some(Outcome::Locked) => {
+            tell(player, "That game is locked by its owner.");
+            true
+        }
+        _ => true,
+    }
 }
 
 pub fn status_line(id: u32) -> Option<String> {
     state::with_game(id, |g| {
         format!(
-            "Time: {}s  Bombs: {}  Flags: {}  {}",
+            "Time: {}s  Bombs: {}  Flags: {}  {}{}",
             g.comp_time_ticks / 20,
             g.bomb_total(),
             g.flag_count(),
@@ -425,8 +585,35 @@ pub fn status_line(id: u32) -> Option<String> {
                 }
             } else {
                 ""
-            }
+            },
+            if g.locked { "  [Locked]" } else { "" },
         )
+    })
+}
+
+/// Colored action-bar component mirroring the old Valence palette:
+/// aqua time, red bombs, gold flags, obfuscated brackets. Built via legacy
+/// `§` codes because the WIT style methods consume the component.
+pub fn status_component(id: u32) -> Option<pumpkin_plugin_api::text::TextComponent> {
+    use pumpkin_plugin_api::text::TextComponent;
+    state::with_game(id, |g| {
+        let mut extra = String::new();
+        if g.is_over {
+            extra.push_str(if g.is_won {
+                " §aWON! Click your board to clear."
+            } else {
+                " §cBOOM! Click your board to clear."
+            });
+        }
+        if g.locked {
+            extra.push_str(" §7[Locked]");
+        }
+        TextComponent::from_legacy_string(&format!(
+            "§kA§r §bTime: {} §r §cBombs: {} §r §6Flags: {}§r{extra}",
+            g.comp_time_ticks / 20,
+            g.bomb_total(),
+            g.flag_count(),
+        ))
     })
 }
 
@@ -438,23 +625,228 @@ pub fn route(pos: Pos3) -> Option<(u32, usize)> {
 }
 
 pub fn describe_all_for(owner_filter: Option<crate::state::UuidKey>) -> String {
-    let snap = state::all_games_snapshot();
     let mut lines = Vec::new();
-    for (id, owner, _world, ticks, bombs, flags, over) in snap {
+    for g in state::all_games_detailed() {
         if let Some(f) = owner_filter {
-            if f != owner {
+            if f != g.owner {
                 continue;
             }
         }
+        let kind = match g.kind {
+            crate::state::GameKind::TwoD => format!("2D {}x{}", g.dim, g.dim),
+            crate::state::GameKind::ThreeD => format!("3D {}x{}x{}", g.dim, g.dim, g.dim),
+        };
         lines.push(format!(
-            "#{id} {}s bombs={bombs} flags={flags} {}",
-            ticks / 20,
-            if over { "over" } else { "active" }
+            "#{id} {kind} {time}s bombs={bombs} flags={flags} helpers={helpers} {state}{locked}",
+            id = g.id,
+            time = g.ticks / 20,
+            bombs = g.bombs,
+            flags = g.flags,
+            helpers = g.helpers,
+            state = if g.over {
+                if g.won { "won" } else { "lost" }
+            } else {
+                "active"
+            },
+            locked = if g.locked { " locked" } else { "" },
         ));
     }
     if lines.is_empty() {
         "No games.".to_string()
     } else {
         lines.join(" | ")
+    }
+}
+
+/// Toggle locks. With `id`: that game only (owner only). Without: all owned.
+/// Returns a human-readable report line.
+pub fn toggle_lock_report(who: crate::state::UuidKey, id: Option<u32>) -> String {
+    match id {
+        Some(id) => match state::toggle_lock(id, who) {
+            Some(locked) => format!(
+                "Game #{id} {}.",
+                if locked { "locked" } else { "unlocked" }
+            ),
+            None => format!("No owned game #{id} to lock."),
+        },
+        None => {
+            let (n, locked) = state::toggle_all_locks(who);
+            if n == 0 {
+                "You have no games to lock.".to_string()
+            } else {
+                format!(
+                    "{n} game(s) {}.",
+                    if locked { "locked" } else { "unlocked" }
+                )
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Cell;
+
+    fn test_game(owner: crate::state::UuidKey, x0: i32, locked: bool) -> GameInstance {
+        // 2x2 board with distinct contents: bomb / empty / number / flagged.
+        let mk = |content: CellContent, state: CellState, dx: i32| Cell {
+            content,
+            state,
+            pos: Pos3::new(x0 + dx, 200, 7001),
+        };
+        GameInstance {
+            kind: GameKind::TwoD,
+            dim: 2,
+            board: vec![
+                mk(CellContent::Bomb, CellState::Closed, 0),
+                mk(CellContent::Empty, CellState::Closed, 1),
+                mk(CellContent::Number(1), CellState::Flagged, 2),
+                mk(CellContent::Number(2), CellState::Opened, 3),
+            ],
+            owner,
+            helpers: Vec::new(),
+            locked,
+            recorded: false,
+            world_id: "test_world".to_string(),
+            comp_time_ticks: 0,
+            is_over: false,
+            is_won: false,
+        }
+    }
+
+    #[test]
+    fn left_guard_blocks_flagged_and_opened_cells() {
+        // Regression test for the flagged-bomb explosion bug: only Closed
+        // cells may proceed to the content match.
+        let owner = (0xBEEF_0001, 0xCAFE_0001);
+        let game = test_game(owner, 60_001, false);
+        assert_eq!(decide_left(&game, owner, 0), ClickDecision::Proceed);
+        assert_eq!(decide_left(&game, owner, 1), ClickDecision::Proceed);
+        assert_eq!(decide_left(&game, owner, 2), ClickDecision::Ignore);
+        assert_eq!(decide_left(&game, owner, 3), ClickDecision::Ignore);
+        assert_eq!(decide_left(&game, owner, 99), ClickDecision::Ignore);
+    }
+
+    #[test]
+    fn guards_enforce_locks_and_game_over() {
+        let owner = (0xBEEF_0002, 0xCAFE_0002);
+        let stranger = (0xDEAD_0002, 0xBEEF_0002);
+        let open_game = test_game(owner, 60_011, false);
+        assert_eq!(decide_left(&open_game, stranger, 0), ClickDecision::Proceed);
+        assert_eq!(decide_right(&open_game, stranger, 0), ClickDecision::Proceed);
+        // Right-click allows unflagging but never acts on opened cells.
+        assert_eq!(decide_right(&open_game, stranger, 2), ClickDecision::Proceed);
+        assert_eq!(decide_right(&open_game, stranger, 3), ClickDecision::Ignore);
+
+        let mut locked = test_game(owner, 60_021, true);
+        assert_eq!(decide_left(&locked, stranger, 0), ClickDecision::DenyLocked);
+        assert_eq!(decide_right(&locked, stranger, 0), ClickDecision::DenyLocked);
+        assert_eq!(decide_left(&locked, owner, 0), ClickDecision::Proceed);
+
+        locked.is_over = true;
+        assert_eq!(decide_left(&locked, owner, 0), ClickDecision::Ignore);
+        assert_eq!(decide_right(&locked, owner, 0), ClickDecision::Ignore);
+    }
+
+    #[test]
+    fn reshuffle_only_on_untouched_nonempty_click() {
+        // Fresh all-closed board: bomb/number want a reshuffle, empty doesn't.
+        let mk = |content: CellContent| Cell {
+            content,
+            state: CellState::Closed,
+            pos: Pos3::default(),
+        };
+        let board = vec![
+            mk(CellContent::Bomb),
+            mk(CellContent::Empty),
+            mk(CellContent::Number(3)),
+        ];
+        assert!(core::all_closed(&board));
+        assert!(needs_first_click_reshuffle(&board, 0)); // bomb
+        assert!(needs_first_click_reshuffle(&board, 2)); // number
+        assert!(!needs_first_click_reshuffle(&board, 1)); // empty
+        assert!(!needs_first_click_reshuffle(&board, 99)); // OOB
+        // A single opened cell anywhere ends first-click protection.
+        let mut touched = board;
+        touched[1].state = CellState::Opened;
+        assert!(!needs_first_click_reshuffle(&touched, 0));
+    }
+
+    #[test]
+    fn locate_roundtrips_generated_boards() {
+        let origin = Pos3::new(200, 64, 300);
+        let mut rng = TinyRng::new(0x5EED);
+        let board2 = generate_board_2d(4, bomb_amount_2d(4), origin, &mut rng);
+        let game2 = GameInstance {
+            kind: GameKind::TwoD,
+            dim: 4,
+            board: board2,
+            owner: (1, 1),
+            helpers: Vec::new(),
+            locked: false,
+            recorded: false,
+            world_id: "w".to_string(),
+            comp_time_ticks: 0,
+            is_over: false,
+            is_won: false,
+        };
+        for idx in 0..16 {
+            let (x, y, z) = locate(&game2, idx);
+            assert_eq!(z, 0);
+            assert_eq!(
+                game2.board[idx].pos,
+                origin.offset(x as i32, 0, y as i32),
+                "2D mismatch at {idx}"
+            );
+            assert_eq!(game2.find_cell(game2.board[idx].pos), Some(idx));
+        }
+
+        let mut rng = TinyRng::new(0x5EED);
+        let board3 = generate_board_3d(3, bomb_amount_3d(3), origin, &mut rng);
+        let game3 = GameInstance {
+            kind: GameKind::ThreeD,
+            dim: 3,
+            board: board3,
+            owner: (1, 1),
+            helpers: Vec::new(),
+            locked: false,
+            recorded: false,
+            world_id: "w".to_string(),
+            comp_time_ticks: 0,
+            is_over: false,
+            is_won: false,
+        };
+        for idx in 0..27 {
+            let (x, y, z) = locate(&game3, idx);
+            assert_eq!(
+                game3.board[idx].pos,
+                origin.offset(x as i32 * 3, z as i32 * 3, y as i32 * 3),
+                "3D mismatch at {idx}"
+            );
+            assert_eq!(game3.find_cell(game3.board[idx].pos), Some(idx));
+        }
+    }
+
+    #[test]
+    fn route_status_and_reports_agree_on_locks() {
+        let owner = (0xBEEF_0004, 0xCAFE_0004);
+        let id = state::insert_game(test_game(owner, 60_051, true));
+        let pos = Pos3::new(60_051, 200, 7001);
+        let (rid, idx) = route(pos).expect("inserted game must route");
+        assert_eq!((rid, idx), (id, 0));
+        assert!(status_line(id).unwrap().contains("[Locked]"));
+        let listing = describe_all_for(Some(owner));
+        assert!(listing.contains("locked"), "{listing}");
+        assert!(describe_all_for(Some((7, 7))).contains("No games."));
+        // Stranger gets the no-owned-game message, owner toggles through.
+        assert_eq!(
+            toggle_lock_report((8, 8), Some(id)),
+            format!("No owned game #{id} to lock.")
+        );
+        assert_eq!(toggle_lock_report(owner, Some(id)), format!("Game #{id} unlocked."));
+        assert!(!status_line(id).unwrap().contains("[Locked]"));
+        state::remove_game(id);
+        assert_eq!(route(pos), None);
     }
 }

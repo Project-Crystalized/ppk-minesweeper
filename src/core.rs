@@ -124,6 +124,9 @@ pub fn count_bombs_2d(board: &[Cell], dim: usize, x: usize, y: usize) -> u8 {
     let mut n: u8 = 0;
     for sy in y as isize - 1..=y as isize + 1 {
         for sx in x as isize - 1..=x as isize + 1 {
+            if sx == x as isize && sy == y as isize {
+                continue;
+            }
             if content_2d(board, dim, sx, sy) == Some(CellContent::Bomb) {
                 n += 1;
             }
@@ -137,6 +140,9 @@ pub fn adjacent_2d(dim: usize, x: usize, y: usize) -> Vec<(usize, usize)> {
     for sy in y as isize - 1..=y as isize + 1 {
         for sx in x as isize - 1..=x as isize + 1 {
             if sx < 0 || sy < 0 || sx >= dim as isize || sy >= dim as isize {
+                continue;
+            }
+            if sx == x as isize && sy == y as isize {
                 continue;
             }
             out.push((sx as usize, sy as usize));
@@ -177,6 +183,9 @@ pub fn count_bombs_3d(board: &[Cell], dim: usize, x: usize, y: usize, z: usize) 
     for sz in z as isize - 1..=z as isize + 1 {
         for sy in y as isize - 1..=y as isize + 1 {
             for sx in x as isize - 1..=x as isize + 1 {
+                if sx == x as isize && sy == y as isize && sz == z as isize {
+                    continue;
+                }
                 if content_3d(board, dim, sx, sy, sz) == Some(CellContent::Bomb) {
                     n = n.saturating_add(1);
                 }
@@ -224,6 +233,9 @@ pub fn adjacent_3d(dim: usize, x: usize, y: usize, z: usize) -> Vec<(usize, usiz
                 if sx >= dim as isize || sy >= dim as isize || sz >= dim as isize {
                     continue;
                 }
+                if sx == x as isize && sy == y as isize && sz == z as isize {
+                    continue;
+                }
                 out.push((sx as usize, sy as usize, sz as usize));
             }
         }
@@ -236,6 +248,9 @@ pub fn adjacent_3d(dim: usize, x: usize, y: usize, z: usize) -> Vec<(usize, usiz
 // ---------------------------------------------------------------------------
 
 pub const COVERED_BLOCK: &str = "minecraft:moss_block";
+/// Default flag block (player red). Per-player colors live in `state.rs`
+/// (`flag_block_for`); this stays as the fallback/documented default.
+#[allow(dead_code)]
 pub const FLAG_BLOCK: &str = "minecraft:red_wool";
 pub const AIR_BLOCK: &str = "minecraft:air";
 
@@ -356,5 +371,132 @@ mod tests {
             .filter(|b| *b)
             .count();
         assert!((1000..3000).contains(&bombs), "bombs={bombs}");
+    }
+
+    #[test]
+    fn neighborhoods_exclude_self() {
+        // 2D center: exactly 8 neighbors, never self.
+        let center = adjacent_2d(5, 2, 2);
+        assert_eq!(center.len(), 8);
+        assert!(!center.contains(&(2, 2)));
+        // Corner / edge clipping still holds.
+        assert_eq!(adjacent_2d(5, 0, 0).len(), 3);
+        assert_eq!(adjacent_2d(5, 1, 0).len(), 5);
+        assert_eq!(adjacent_2d(2, 0, 0).len(), 3);
+        // 3D center: exactly 26 neighbors, never self.
+        let center3 = adjacent_3d(5, 2, 2, 2);
+        assert_eq!(center3.len(), 26);
+        assert!(!center3.contains(&(2, 2, 2)));
+        assert_eq!(adjacent_3d(5, 0, 0, 0).len(), 7);
+    }
+
+    #[test]
+    fn bomb_counts_exclude_center_cell() {
+        // Lone bomb in a 3x3: orthogonal + diagonal neighbors see 1...
+        let mut board = vec![Cell::default(); 9];
+        board[1 * 3 + 1].content = CellContent::Bomb;
+        assert_eq!(count_bombs_2d(&board, 3, 0, 0), 1);
+        assert_eq!(count_bombs_2d(&board, 3, 1, 0), 1);
+        // ...but the bomb cell itself counts 0 neighbors.
+        assert_eq!(count_bombs_2d(&board, 3, 1, 1), 0);
+
+        let mut board3 = vec![Cell::default(); 27];
+        board3[(1 * 3 + 1) * 3 + 1].content = CellContent::Bomb;
+        assert_eq!(count_bombs_3d(&board3, 3, 0, 0, 0), 1);
+        assert_eq!(count_bombs_3d(&board3, 3, 1, 1, 1), 0);
+    }
+
+    #[test]
+    fn generated_numbers_match_neighbor_counts() {
+        // Property over several seeds/sizes: every Number cell equals a fresh
+        // recount, so generation and counting can never drift apart.
+        for (seed, dim) in [(11, 4), (12, 6), (13, 9)] {
+            let mut rng = TinyRng::new(seed);
+            let board = generate_board_2d(dim, bomb_amount_2d(dim), Pos3::new(0, 64, 0), &mut rng);
+            for y in 0..dim {
+                for x in 0..dim {
+                    let c = &board[y * dim + x];
+                    match c.content {
+                        CellContent::Number(n) => assert_eq!(n, count_bombs_2d(&board, dim, x, y)),
+                        CellContent::Empty => assert_eq!(count_bombs_2d(&board, dim, x, y), 0),
+                        CellContent::Bomb => {}
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn board_3d_positions_unique_and_spaced() {
+        let mut rng = TinyRng::new(9);
+        let dim = 4;
+        let origin = Pos3::new(10, 64, -7);
+        let board = generate_board_3d(dim, 5, origin, &mut rng);
+        assert_eq!(board.len(), dim * dim * dim);
+        let mut seen = std::collections::HashSet::new();
+        for c in &board {
+            assert_eq!((c.pos.x - origin.x) % 3, 0, "x not on 3-grid");
+            assert_eq!((c.pos.y - origin.y) % 3, 0, "y not on 3-grid");
+            assert_eq!((c.pos.z - origin.z) % 3, 0, "z not on 3-grid");
+            assert!(seen.insert((c.pos.x, c.pos.y, c.pos.z)), "dup pos");
+        }
+    }
+
+    #[test]
+    fn win_and_closed_transitions() {
+        let mut board = vec![Cell::default(); 4];
+        board[0].content = CellContent::Bomb;
+        assert!(all_closed(&board));
+        assert!(!is_won(&board));
+        // Flagging the bomb still counts as "not opened, but a bomb" -> win
+        // once everything else is open.
+        board[0].state = CellState::Flagged;
+        for c in board.iter_mut().skip(1) {
+            c.state = CellState::Opened;
+        }
+        assert!(!all_closed(&board));
+        assert!(is_won(&board));
+    }
+
+    #[test]
+    fn palette_covers_big_3d_numbers() {
+        assert_eq!(revealed_block_name(CellContent::Empty), "minecraft:stone");
+        assert_eq!(revealed_block_name(CellContent::Bomb), "minecraft:tnt");
+        for n in 0..=30u8 {
+            let name = revealed_block_name(CellContent::Number(n));
+            assert!(!name.is_empty(), "no block for {n}");
+        }
+    }
+
+    #[test]
+    fn rng_and_hash_are_deterministic() {
+        let mut a = TinyRng::new(1234);
+        let mut b = TinyRng::new(1234);
+        for _ in 0..5 {
+            assert_eq!(a.next_u64(), b.next_u64());
+        }
+        // Seed 0 is remapped away from the degenerate state.
+        let mut z = TinyRng::new(0);
+        assert_ne!(z.next_u64(), 0);
+        assert_eq!(hash2(5, -7, 99), hash2(5, -7, 99));
+        assert_ne!(hash2(1, 0, 99), hash2(0, 1, 99));
+    }
+
+    #[test]
+    fn infinite_numbers_match_manual_neighbor_count() {
+        for x in -3..=3 {
+            for z in -3..=3 {
+                let mut manual: u8 = 0;
+                for dz in -1..=1 {
+                    for dx in -1..=1 {
+                        if dx == 0 && dz == 0 {
+                            continue;
+                        }
+                        manual += infinite_is_bomb(x + dx, z + dz, 777) as u8;
+                    }
+                }
+                assert_eq!(infinite_number_at(x, z, 777), manual, "at {x},{z}");
+            }
+        }
     }
 }

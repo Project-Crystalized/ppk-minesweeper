@@ -75,6 +75,10 @@ pub fn action_bar(player: &Player, text: &str) {
     player.send_system_message(msg(text), true);
 }
 
+pub fn action_bar_component(player: &Player, comp: TextComponent) {
+    player.send_system_message(comp, true);
+}
+
 /// Positional world sound, mirroring the old Valence sound cues.
 ///
 /// NOTE: this deliberately uses `play_custom_sound` with explicit vanilla

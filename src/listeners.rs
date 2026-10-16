@@ -21,10 +21,14 @@ pub struct JoinListener;
 
 impl EventHandler<PlayerJoinEvent> for JoinListener {
     fn handle(&self, _server: Server, event: EventData<PlayerJoinEvent>) -> EventData<PlayerJoinEvent> {
-        crate::sticks::give_kit(&event.player);
+        // Fresh minigame inventory: wipe first (stale kit pieces could sit in
+        // armor/offhand slots), then lay out the kit in the main inventory
+        // grid. Drag a starter to your hotbar and right-click to play.
+        crate::sticks::give_fresh_kit(&event.player);
+        crate::infinite::hydrate_session(&event.player);
         tell(
             &event.player,
-            "Minesweeper is installed! Starter sticks added - right-click one to play, or /ms help. Building, breaking and mob spawning are disabled.",
+            "Minesweeper is installed! Starter sticks are in your inventory - drag one to your hotbar and right-click to play, or /ms help. Building, breaking and mob spawning are disabled.",
         );
         event
     }
@@ -56,7 +60,7 @@ pub struct BreakListener;
 impl EventHandler<BlockBreakEvent> for BreakListener {
     fn handle(
         &self,
-        _server: Server,
+        server: Server,
         mut event: EventData<BlockBreakEvent>,
     ) -> EventData<BlockBreakEvent> {
         let Some(player) = &event.player else {
@@ -76,16 +80,17 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
         );
 
         if let Some((id, idx)) = games::route(pos) {
-            if games::click_left(&world, player, id, idx) {
-                event.cancelled = true;
-                event.should_drop = false;
-                event.exp = 0;
-            }
+            // Board clicks never break the underlying block, even when the
+            // click itself is a no-op (flagged/open/locked/finished board).
+            games::click_left(&world, &server, player, id, idx);
+            event.cancelled = true;
+            event.should_drop = false;
+            event.exp = 0;
             return event;
         }
 
         if infinite::is_infinite_world(&world)
-            && infinite::handle_break(&world, player, pos.x, pos.y, pos.z)
+            && infinite::handle_break(&world, &server, player, pos.x, pos.y, pos.z)
         {
             event.cancelled = true;
             event.should_drop = false;
@@ -120,6 +125,29 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
             event.cancelled = true;
             return event;
         }
+        // Lock toggle / flag-color cycle items (slot 43/44 equivalents).
+        // They work on air clicks too, like the old InteractItemEvent flow.
+        if let Some(special) = crate::sticks::held_special(&event.player) {
+            use crate::sticks::HeldSpecial;
+            match special {
+                HeldSpecial::LockToggle => {
+                    let key = uuid_key(&event.player);
+                    let line = crate::games::toggle_lock_report(key, None);
+                    tell(&event.player, &line);
+                    crate::sticks::refresh_utility_items(&event.player);
+                }
+                HeldSpecial::FlagCycle => {
+                    let key = uuid_key(&event.player);
+                    let block = crate::state::cycle_flag_style(key);
+                    let name = crate::state::flag_style_name(key);
+                    tell(&event.player, &format!("Flag color: {name}."));
+                    crate::sticks::refresh_utility_items(&event.player);
+                    let _ = block;
+                }
+            }
+            event.cancelled = true;
+            return event;
+        }
         if event.action != InteractAction::RightClickBlock {
             return event;
         }
@@ -141,9 +169,8 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
         );
 
         if let Some((id, idx)) = games::route(pos) {
-            if games::click_right(&world, id, idx) {
-                event.cancelled = true;
-            }
+            games::click_right(&world, &event.player, id, idx);
+            event.cancelled = true;
             return event;
         }
 

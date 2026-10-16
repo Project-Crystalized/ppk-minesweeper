@@ -13,7 +13,7 @@ use crate::{games::NewGameSpec, helpers::uuid_key, state::GameKind};
 
 fn help_text() -> TextComponent {
     TextComponent::text(&format!(
-        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. /ms kit re-gives sticks. /ms clear removes your games. /ms infinite teleports to endless mode.",
+        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. /ms kit re-gives sticks + lock/flag items. /ms lock [id] toggles game locks (or right-click the horse-armor item). /ms flag cycles flag color. /ms clear removes your games. /ms stats shows your records. /ms top shows leaderboards. /ms infinite teleports to endless mode.",
         crate::games::NewGameSpec::all_labels()
     ))
 }
@@ -135,14 +135,14 @@ pub struct ClearCommand;impl CommandHandler for ClearCommand {
     fn handle(
         &self,
         sender: CommandSender,
-        _server: Server,
+        server: Server,
         _args: ConsumedArgs,
     ) -> Result<i32, CommandError> {
         let Some(player) = player_of(&sender) else {
             sender.send_error(TextComponent::text("Only players can clear games."));
             return Ok(0);
         };
-        crate::games::clear_player_games(&player);
+        crate::games::clear_player_games(&player, &server);
         Ok(1)
     }
 }
@@ -199,6 +199,148 @@ impl CommandHandler for KitCommand {
             return Ok(0);
         };
         crate::sticks::give_kit_and_tell(&player);
+        Ok(1)
+    }
+}
+
+pub struct LockCommand;
+
+impl CommandHandler for LockCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(player) = player_of(&sender) else {
+            sender.send_error(TextComponent::text("Only players can lock games."));
+            return Ok(0);
+        };
+        let id = match args.get_value("id") {
+            Arg::Num(Ok(Number::Int32(n))) => u32::try_from(n).ok(),
+            Arg::Num(Ok(Number::Int64(n))) => u32::try_from(n).ok(),
+            _ => None,
+        };
+        let line = crate::games::toggle_lock_report(uuid_key(&player), id);
+        sender.send_message(TextComponent::text(&line));
+        crate::sticks::refresh_utility_items(&player);
+        Ok(1)
+    }
+}
+
+pub struct FlagCommand;
+
+impl CommandHandler for FlagCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        _args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(player) = player_of(&sender) else {
+            sender.send_error(TextComponent::text("Only players can switch flags."));
+            return Ok(0);
+        };
+        let name = {
+            let key = uuid_key(&player);
+            crate::state::cycle_flag_style(key);
+            crate::state::flag_style_name(key)
+        };
+        sender.send_message(TextComponent::text(&format!("Flag color: {name}.")));
+        crate::sticks::refresh_utility_items(&player);
+        Ok(1)
+    }
+}
+
+pub struct StatsCommand;
+
+/// Board label with the right dimensionality ("2D 30x30", "3D 5x5x5").
+fn spec_label(mode: &str, dim: usize) -> String {
+    if mode == "3D" {
+        format!("3D {dim}x{dim}x{dim}")
+    } else {
+        format!("{mode} {dim}x{dim}")
+    }
+}
+
+impl CommandHandler for StatsCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        _args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(player) = player_of(&sender) else {
+            sender.send_error(TextComponent::text("Only players have stats."));
+            return Ok(0);
+        };
+        let key = uuid_key(&player);
+        let mut lines = vec![format!("Stats for {}:", player.get_name())];
+        let records = crate::db::box_records(key);
+        if records.is_empty() {
+            lines.push("No recorded box games yet.".to_string());
+        }
+        for r in records {
+            let games = if r.games == 1 { "1 game".into() } else { format!("{} games", r.games) };
+            let wins = if r.wins == 1 { "1 win".into() } else { format!("{} wins", r.wins) };
+            match r.best_secs {
+                Some(secs) => lines.push(format!(
+                    "{}: {games}, {wins}, best {secs}s",
+                    spec_label(&r.mode, r.dim)
+                )),
+                None => lines.push(format!("{}: {games}, {wins}", spec_label(&r.mode, r.dim))),
+            }
+        }
+        match crate::db::load_infinite(key) {
+            Some(row) => lines.push(format!(
+                "Infinite: best streak {} ({} opened, {} bombs)",
+                row.top, row.opened, row.bombs
+            )),
+            None => lines.push("Infinite: no recorded cells yet.".to_string()),
+        }
+        sender.send_message(TextComponent::text(&lines.join("\n")));
+        Ok(1)
+    }
+}
+
+pub struct TopCommand;
+
+impl CommandHandler for TopCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        _args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let mut lines = vec!["Top box wins (fastest):".to_string()];
+        let wins = crate::db::top_wins(None, 10);
+        if wins.is_empty() {
+            lines.push("No recorded wins yet.".to_string());
+        }
+        for (i, w) in wins.iter().enumerate() {
+            lines.push(format!(
+                "{}. {} - {} in {}s",
+                i + 1,
+                w.owner_name,
+                spec_label(&w.mode, w.dim),
+                w.secs
+            ));
+        }
+        lines.push("Top infinite streaks:".to_string());
+        let inf = crate::db::top_infinite(5);
+        if inf.is_empty() {
+            lines.push("No recorded streaks yet.".to_string());
+        }
+        for (i, t) in inf.iter().enumerate() {
+            lines.push(format!(
+                "{}. {} - streak {} ({} opened)",
+                i + 1,
+                t.name,
+                t.top,
+                t.opened
+            ));
+        }
+        sender.send_message(TextComponent::text(&lines.join("\n")));
         Ok(1)
     }
 }

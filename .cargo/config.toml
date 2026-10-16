@@ -1,2 +1,10 @@
 [build]
 target = "wasm32-wasip2"
+
+# C toolchain for `rusqlite/bundled` (SQLite amalgamation) when targeting
+# wasm32-wasip2. Install wasi-sdk and point these at it; real environment
+# variables override these defaults.
+# https://github.com/WebAssembly/wasi-sdk/releases
+[env]
+CC_wasm32_wasip2 = "/home/nico/.local/wasi-sdk/bin/clang"
+CFLAGS_wasm32_wasip2 = "--sysroot=/home/nico/.local/wasi-sdk/share/wasi-sysroot"

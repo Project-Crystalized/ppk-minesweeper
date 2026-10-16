@@ -48,11 +48,40 @@ fn tick(server: Server) {
                 pitch
             );
         }
-        let mine = state::player_games(key);
-        if let Some(first) = mine.first() {
-            if let Some(line) = games::status_line(*first) {
-                let extra = if mine.len() > 1 {
-                    format!(" (+{} more, /ms list)", mine.len() - 1)
+        // Show the nearest board (any owner), like the old server's
+        // `show_action_bar` which picked the closest `ActionState.center`.
+        // Falls back to the player's own first game when worlds differ.
+        let (px, py, pz) = player.get_position();
+        let mut best: Option<(f64, u32, usize)> = None;
+        let mut mine_first: Option<u32> = None;
+        let mut mine_count = 0usize;
+        for g in state::all_games_detailed() {
+            if g.owner == key {
+                mine_count += 1;
+                mine_first.get_or_insert(g.id);
+            }
+            // Only boards in the player's current world compete by distance.
+            let world = player.get_world();
+            if world.get_id() != g.world_id {
+                continue;
+            }
+            let dx = g.center.x as f64 - px;
+            let dy = g.center.y as f64 - py;
+            let dz = g.center.z as f64 - pz;
+            let d2 = dx * dx + dy * dy + dz * dz;
+            if best.is_none_or(|(bd, _, _)| d2 < bd) {
+                best = Some((d2, g.id, 0));
+            }
+        }
+        let show_id = best.map(|(_, id, _)| id).or(mine_first);
+        if let Some(id) = show_id {
+            if let Some(comp) = games::status_component(id) {
+                crate::helpers::action_bar_component(&player, comp);
+                continue;
+            }
+            if let Some(line) = games::status_line(id) {
+                let extra = if mine_count > 1 {
+                    format!(" (+{} more, /ms list)", mine_count - 1)
                 } else {
                     String::new()
                 };

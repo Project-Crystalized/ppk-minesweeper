@@ -12,9 +12,9 @@ use pumpkin_plugin_api::{
 use crate::{
     core::{
         infinite_is_bomb, infinite_number_at, revealed_block_name, CellContent, CellState, Pos3,
-        COVERED_BLOCK, FLAG_BLOCK,
+        COVERED_BLOCK,
     },
-    helpers::{action_bar, block_is, block_name, is_air, play_sound, set_block, tell, to_block_pos, uuid_key, Sound},
+    helpers::{block_is, block_name, is_air, play_sound, set_block, tell, to_block_pos, uuid_key, Sound},
     state,
 };
 
@@ -145,11 +145,19 @@ pub fn teleport_here(player: &Player, server: &Server) {
         set_block(&world, pad, COVERED_BLOCK);
     }
     player.teleport((8.5, ty as f64, 8.5), None, None, world);
+    hydrate_session(player);
     tell(player, "Welcome to infinite minesweeper! Open cells, avoid TNT.");
 }
 
 /// Left-click in the infinite world. Returns true if intercepted.
-pub fn handle_break(world: &World, player: &Player, x: i32, y: i32, z: i32) -> bool {
+pub fn handle_break(
+    world: &World,
+    server: &Server,
+    player: &Player,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> bool {
     tracing::info!(
         "infinite: break at {x}, {y}, {z} (board_y={BOARD_Y}, world={})",
         world.get_id()
@@ -218,32 +226,74 @@ pub fn handle_break(world: &World, player: &Player, x: i32, y: i32, z: i32) -> b
     });
 
     match outcome {
-        Outcome::Ignored => true, // swallow breaks on already-open cells
+        Outcome::Ignored => true, // swallow breaks on already-open/flagged cells
         Outcome::Bomb => {
             play_sound(world, Pos3::new(x, y, z), Sound::EntityGenericExplode);
             state::with_session_mut(key, |s| {
                 s.current_streak = 0;
                 s.total_bombs += 1;
             });
+            persist_session(key, player);
             tell(player, "You clicked a bomb, streak reset!");
             overlay(player, key);
             true
         }
         Outcome::Opened(n) => {
             play_sound(world, Pos3::new(x, y, z), Sound::EntityFrogStep);
-            state::with_session_mut(key, |s| {
+            let milestone = state::with_session_mut(key, |s| {
                 s.total_opened += n;
                 s.current_streak += n;
                 s.top_streak = s.top_streak.max(s.current_streak);
+                s.current_streak
             });
+            persist_session(key, player);
             overlay(player, key);
+            // Milestone broadcasts mirror the old server (500 / 1000 streaks).
+            if milestone == 500 || milestone == 1000 {
+                let name = player.get_name();
+                for p in server.get_all_players() {
+                    tell(
+                        &p,
+                        &format!("{name} has reached a streak of {milestone}."),
+                    );
+                }
+            }
             true
         }
     }
 }
 
+/// Write-through session snapshot (one row per player). Fail-soft. Only the
+/// durable numbers go out (best/total); the live streak restarts at 0 after
+/// every login (see hydrate_session).
+fn persist_session(key: crate::state::UuidKey, player: &Player) {
+    let (top, opened, bombs) = state::with_session_mut(key, |s| {
+        (s.top_streak, s.total_opened, s.total_bombs)
+    });
+    crate::db::save_infinite(key, &player.get_name(), top, opened, bombs);
+}
+
+/// Restore durable totals after a restart; the live streak always starts at 0.
+pub fn hydrate_session(player: &Player) {
+    let key = uuid_key(player);
+    if let Some(row) = crate::db::load_infinite(key) {
+        state::with_session_mut(key, |s| {
+            s.current_streak = 0;
+            s.top_streak = row.top;
+            s.total_opened = row.opened;
+            s.total_bombs = row.bombs;
+        });
+        tracing::info!(
+            "infinite: hydrated {} (best {}, opened {})",
+            player.get_name(),
+            row.top,
+            row.opened,
+        );
+    }
+}
+
 /// Right-click flag toggle in the infinite world. Returns true if intercepted.
-pub fn handle_interact(world: &World, _player: &Player, x: i32, y: i32, z: i32) -> bool {
+pub fn handle_interact(world: &World, player: &Player, x: i32, y: i32, z: i32) -> bool {
     tracing::info!(
         "infinite: interact at {x}, {y}, {z} (board_y={BOARD_Y}, world={})",
         world.get_id()
@@ -257,37 +307,96 @@ pub fn handle_interact(world: &World, _player: &Player, x: i32, y: i32, z: i32) 
         return true; // off-hand duplicate / spam: swallow, keep cancelled
     }
     state::lock_infinite_flag(&world_id, x, z, now + state::FLAG_LOCK_TICKS);
-    // Flags live and die by the visible block: wool unflags, moss flags,
-    // anything already revealed is left alone.
+    // Flags live and die by the visible block: any known flag wool unflags,
+    // moss flags with the player's own color, anything revealed is ignored.
     let pos = Pos3::new(x, y, z);
-    match block_name(world, to_block_pos(pos)).as_str() {
-        b if block_is(b, FLAG_BLOCK) => {
-            state::with_infinite_board_mut(&world_id, |board| {
-                board.cells.insert((x, z), CellState::Closed);
-            });
-            set_block(world, pos, COVERED_BLOCK);
-            play_sound(world, pos, Sound::BlockWoolBreak);
-        }
-        b if block_is(b, COVERED_BLOCK) => {
-            state::with_infinite_board_mut(&world_id, |board| {
-                board.cells.insert((x, z), CellState::Flagged);
-            });
-            set_block(world, pos, FLAG_BLOCK);
-            play_sound(world, pos, Sound::BlockWoolPlace);
-        }
-        _ => {}
+    let name = block_name(world, to_block_pos(pos));
+    if is_flag_wool(&name) {
+        state::with_infinite_board_mut(&world_id, |board| {
+            board.cells.insert((x, z), CellState::Closed);
+        });
+        set_block(world, pos, COVERED_BLOCK);
+        play_sound(world, pos, Sound::BlockWoolBreak);
+    } else if block_is(&name, COVERED_BLOCK) {
+        state::with_infinite_board_mut(&world_id, |board| {
+            board.cells.insert((x, z), CellState::Flagged);
+        });
+        let flag_block = state::flag_block_for(uuid_key(player));
+        set_block(world, pos, flag_block);
+        play_sound(world, pos, Sound::BlockWoolPlace);
     }
     true
 }
 
+fn is_flag_wool(name: &str) -> bool {
+    crate::state::FLAG_STYLE_ORDER
+        .iter()
+        .any(|(_, block)| block_is(name, block))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_matches_hash_helpers() {
+        for x in -4..=4 {
+            for z in -4..=4 {
+                match content_at(x, z) {
+                    CellContent::Bomb => assert!(infinite_is_bomb(x, z, BOARD_SEED)),
+                    CellContent::Empty => {
+                        assert!(!infinite_is_bomb(x, z, BOARD_SEED));
+                        assert_eq!(infinite_number_at(x, z, BOARD_SEED), 0);
+                    }
+                    CellContent::Number(n) => {
+                        assert!(!infinite_is_bomb(x, z, BOARD_SEED));
+                        assert_eq!(infinite_number_at(x, z, BOARD_SEED), n);
+                        assert!(n >= 1 && n <= 8, "2D neighbor max is 8, got {n}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flag_wool_recognizes_every_style() {
+        for (_, block) in crate::state::FLAG_STYLE_ORDER {
+            assert!(is_flag_wool(block), "{block}");
+            // Reads may come back without the namespace.
+            let short = block.rsplit(':').next().unwrap();
+            assert!(is_flag_wool(short), "{short}");
+        }
+        assert!(!is_flag_wool("minecraft:moss_block"));
+        assert!(!is_flag_wool("minecraft:stone"));
+        assert!(!is_flag_wool("minecraft:tnt"));
+    }
+}
+
 fn overlay(player: &Player, key: crate::state::UuidKey) {
+    use pumpkin_plugin_api::text::TextComponent;
     state::with_session_mut(key, |s| {
-        action_bar(
-            player,
-            &format!(
-                "Streak: {}  Best: {}  Opened: {}",
+        // Color tiers mirror the old server (gray -> green -> blue ->
+        // dark-blue -> red -> dark-red -> gold), obfuscated past 1000.
+        let code = match s.current_streak {
+            0..=50 => "§7",
+            51..=150 => "§a",
+            151..=300 => "§9",
+            301..=500 => "§1",
+            501..=1000 => "§c",
+            1001..=2000 => "§4",
+            _ => "§6",
+        };
+        let body = if s.current_streak > 1000 {
+            format!(
+                "§ka {code}Streak: {}  Best: {}  Opened: {}§r §ka§r",
                 s.current_streak, s.top_streak, s.total_opened
-            ),
-        );
+            )
+        } else {
+            format!(
+                "{code}Streak: {}  Best: {}  Opened: {}",
+                s.current_streak, s.top_streak, s.total_opened
+            )
+        };
+        crate::helpers::action_bar_component(player, TextComponent::from_legacy_string(&body));
     });
 }

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 pumpkin-plugin-api = "0.2.0"
 tracing = "0.1.44"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [lib] 
 crate-type = ["cdylib"]
