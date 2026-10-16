@@ -346,6 +346,25 @@ pub fn top_wins(mode: Option<&str>, limit: usize) -> Vec<TopWin> {
     with_conn(|c| top_wins_in(c, mode, limit)).unwrap_or_default()
 }
 
+/// Fastest wins for one exact board spec (mode + dim), all-time.
+/// Backs the in-world leaderboard displays.
+pub fn top_spec_wins_in(conn: &Connection, mode: &str, dim: usize, limit: usize) -> Vec<TopWin> {
+    let mut stmt = match conn.prepare(
+        "SELECT owner_name, mode, dim, MIN(time_ticks) FROM MsBoxGames \
+         WHERE won = 1 AND mode = ? AND dim = ? GROUP BY owner_uuid \
+         ORDER BY MIN(time_ticks) ASC LIMIT ?;",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(params![mode, dim as i64, limit as i64], map_top_win);
+    rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
+}
+
+pub fn top_spec_wins(mode: &str, dim: usize, limit: usize) -> Vec<TopWin> {
+    with_conn(|c| top_spec_wins_in(c, mode, dim, limit)).unwrap_or_default()
+}
+
 pub struct TopInfinite {
     pub name: String,
     pub top: usize,
@@ -440,6 +459,25 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].owner_name, "Alice");
         assert!(top_wins_in(&conn, Some("3D"), 10).is_empty());
+        dropdb(&path);
+    }
+
+    #[test]
+    fn spec_leaderboard_filters_and_orders() {
+        let (conn, path) = memdb();
+        record_box_game_in(&conn, 50, "2D", 3000, true, (1, 1), "Slow", &[]).unwrap();
+        record_box_game_in(&conn, 50, "2D", 1000, true, (2, 2), "Fast", &[]).unwrap();
+        record_box_game_in(&conn, 7, "3D", 500, true, (3, 3), "Cube", &[]).unwrap();
+        record_box_game_in(&conn, 50, "2D", 100, false, (4, 4), "Unlucky", &[]).unwrap();
+        let board = top_spec_wins_in(&conn, "2D", 50, 10);
+        assert_eq!(board.len(), 2);
+        assert_eq!(board[0].owner_name, "Fast");
+        assert_eq!(board[0].secs, 50);
+        assert_eq!(board[1].owner_name, "Slow");
+        // Losses never appear; other specs never leak in.
+        assert!(top_spec_wins_in(&conn, "2D", 30, 10).is_empty());
+        assert_eq!(top_spec_wins_in(&conn, "3D", 7, 10).len(), 1);
+        assert_eq!(top_spec_wins_in(&conn, "2D", 50, 1).len(), 1);
         dropdb(&path);
     }
 

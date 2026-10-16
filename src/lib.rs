@@ -13,6 +13,7 @@ mod commands;
 mod core;
 mod db;
 mod games;
+mod leaderboard;
 mod helpers;
 mod infinite;
 mod listeners;

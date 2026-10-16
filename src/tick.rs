@@ -35,6 +35,12 @@ fn tick(server: Server) {
     }
     state::prune_flag_locks(now);
 
+    // Leaderboards refresh on their own slow cadence (plus once shortly
+    // after load so boards appear without waiting a full cycle).
+    if now == 40 || now % crate::leaderboard::REFRESH_TICKS == 0 {
+        crate::leaderboard::refresh(&server);
+    }
+
     for player in server.get_all_players() {
         let key = uuid_key(&player);
         // Tripwire for the first-click pitch snap: log if anyone's view is

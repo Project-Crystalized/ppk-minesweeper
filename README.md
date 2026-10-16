@@ -50,6 +50,18 @@ there, bind-mount it over the plugin data folder server-side
 (`mount --bind ~/databases/ms <server>/plugins/data/<plugin>`), then read it
 with `sqlite3` like the other game DBs.
 
+## Leaderboards (text displays)
+
+Two all-time boards as text display entities, refreshed from SQLite every
+60 seconds (plus once ~2s after load): **2D 50x50 at (4, 2, 27)** and
+**3D 7x7 at (-12, 2, 27)** in the default world (`"world"`, else the first
+loaded world). Each board is one gold header on top plus the top-10 fastest
+wins below it in a single text display entity (tags `ms_lb_2d50`,
+`ms_lb_3d7`). Lines are
+tagged (`ms_lb_2d50_00`…), so refresh updates them in place and restarts
+heal without ghosts. Coordinates live in `src/leaderboard.rs` (`BOARDS`).
+`/ms top` shows the same data in chat.
+
 ## Build
 
 Prerequisite for the SQLite dependency: a wasi-sdk for the
