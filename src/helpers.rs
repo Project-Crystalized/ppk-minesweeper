@@ -2,11 +2,11 @@
 
 use pumpkin_plugin_api::{
     common::BlockPos, text::TextComponent,
-    wit::pumpkin::plugin::{game_rules::GameRule, world::BlockFlags},
+    wit::pumpkin::plugin::{game_rules::GameRule, world::Block, world::BlockFlags},
     Player, World,
 };
 
-use crate::{core::Pos3, state::UuidKey};
+use crate::{core::{CellContent, Pos3}, state::UuidKey};
 
 pub use pumpkin_plugin_api::wit::pumpkin::plugin::sounds::{Sound, SoundCategory};
 
@@ -36,6 +36,33 @@ pub fn block_name(world: &World, pos: BlockPos) -> String {
 
 pub fn set_block(world: &World, pos: Pos3, name: &str) -> bool {
     world.set_block_by_name(to_block_pos(pos), name, update_flags())
+}
+
+/// Places a specific `facing` state of a block, resolved through the block
+/// registry. Falls back to the block's default state if the lookup fails.
+pub fn set_block_facing(world: &World, pos: Pos3, name: &str, facing: &str) -> bool {
+    if let Some(block) = Block::from_name(name) {
+        let state = block.get_states().into_iter().find(|s| {
+            s.get_properties()
+                .iter()
+                .any(|(k, v)| k == "facing" && v == facing)
+        });
+        if let Some(state) = state {
+            world.set_block_state(to_block_pos(pos), state.id, update_flags());
+            return true;
+        }
+    }
+    set_block(world, pos, name)
+}
+
+/// Reveals a minesweeper cell. Digit tiles carry their `facing` so Java-RP
+/// can render the matching tile art per block state.
+pub fn set_tile(world: &World, pos: Pos3, content: CellContent) -> bool {
+    let (name, facing) = crate::core::revealed_tile(content);
+    match facing {
+        Some(face) => set_block_facing(world, pos, name, face),
+        None => set_block(world, pos, name),
+    }
 }
 
 pub fn is_air_name(name: &str) -> bool {

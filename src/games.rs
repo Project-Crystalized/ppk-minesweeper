@@ -5,10 +5,10 @@ use pumpkin_plugin_api::{Player, World};
 use crate::{
     core::{
         self, adjacent_2d, adjacent_3d, bomb_amount_2d, bomb_amount_3d, generate_board_2d,
-        generate_board_3d, is_won, revealed_block_name, CellContent, CellState, Pos3, TinyRng,
+        generate_board_3d, is_won, CellContent, CellState, Pos3, TinyRng,
         AIR_BLOCK, COVERED_BLOCK,
     },
-    helpers::{self, is_air, play_sound, set_block, tell, Sound},
+    helpers::{self, is_air, play_sound, set_block, set_tile, tell, Sound},
     state::{
         self, GameInstance, GameKind, MAX_BUILD_Y, MAX_GAMES_PER_PLAYER, MIN_BUILD_Y,
         FLAG_LOCK_TICKS,
@@ -225,7 +225,7 @@ pub fn clear_game_in_world(world: &World, id: u32) {
 
 fn reveal_all(world: &World, game: &GameInstance) {
     for cell in &game.board {
-        set_block(world, cell.pos, revealed_block_name(cell.content));
+        set_tile(world, cell.pos, cell.content);
     }
 }
 
@@ -245,7 +245,7 @@ fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
             continue;
         }
         cell.state = CellState::Opened;
-        set_block(world, cell.pos, revealed_block_name(cell.content));
+        set_tile(world, cell.pos, cell.content);
         if cell.content == CellContent::Empty {
             for (ax, ay) in adjacent_2d(dim, x, y) {
                 let aidx = ay * dim + ax;
@@ -273,7 +273,7 @@ fn open_cell_3d(world: &World, game: &mut GameInstance, start: (usize, usize, us
             continue;
         }
         cell.state = CellState::Opened;
-        set_block(world, cell.pos, revealed_block_name(cell.content));
+        set_tile(world, cell.pos, cell.content);
         if cell.content == CellContent::Empty {
             for (ax, ay, az) in adjacent_3d(dim, x, y, z) {
                 let aidx = at(ax, ay, az);
@@ -424,7 +424,7 @@ pub fn click_left(
             CellContent::Number(_) => {
                 let pos = game.board[idx].pos;
                 game.board[idx].state = CellState::Opened;
-                set_block(world, pos, revealed_block_name(game.board[idx].content));
+                set_tile(world, pos, game.board[idx].content);
                 play_sound(world, pos, Sound::EntityFrogStep);
                 if is_won(&game.board) {
                     play_sound(world, pos, Sound::ItemGoatHornSound1);

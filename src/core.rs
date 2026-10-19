@@ -254,40 +254,44 @@ pub const COVERED_BLOCK: &str = "minecraft:moss_block";
 pub const FLAG_BLOCK: &str = "minecraft:red_wool";
 pub const AIR_BLOCK: &str = "minecraft:air";
 
-/// Maps revealed content to a vanilla block, mirroring the old Valence
-/// glazed-terracotta palette. Extended past 12 (3D boards can reach 26)
-/// with concrete blocks instead of panicking like the old code did.
-pub fn revealed_block_name(content: CellContent) -> &'static str {
+/// Maps revealed content to a vanilla block plus an optional `facing`
+/// property value for Java-RP's minesweeper tile art.
+///
+/// Java-RP retextures cyan/lime/magenta glazed terracotta so every facing
+/// renders a different tile (digits 1..=12). Numbers 13+ fall back to
+/// concrete colors like before (3D boards can reach 26; those digits have
+/// no tile art and are practically unreachable).
+pub fn revealed_tile(content: CellContent) -> (&'static str, Option<&'static str>) {
     match content {
-        CellContent::Empty => "minecraft:stone",
-        CellContent::Bomb => "minecraft:tnt",
+        CellContent::Empty => ("minecraft:stone", None),
+        CellContent::Bomb => ("minecraft:tnt", None),
         CellContent::Number(n) => match n {
-            1 => "minecraft:blue_glazed_terracotta",
-            2 => "minecraft:green_glazed_terracotta",
-            3 => "minecraft:red_glazed_terracotta",
-            4 => "minecraft:black_glazed_terracotta",
-            5 => "minecraft:orange_glazed_terracotta",
-            6 => "minecraft:light_blue_glazed_terracotta",
-            7 => "minecraft:purple_glazed_terracotta",
-            8 => "minecraft:gray_glazed_terracotta",
-            9 => "minecraft:white_glazed_terracotta",
-            10 => "minecraft:light_gray_terracotta",
-            11 => "minecraft:brown_glazed_terracotta",
-            12 => "minecraft:yellow_glazed_terracotta",
-            13 => "minecraft:white_concrete",
-            14 => "minecraft:light_gray_concrete",
-            15 => "minecraft:gray_concrete",
-            16 => "minecraft:black_concrete",
-            17 => "minecraft:brown_concrete",
-            18 => "minecraft:red_concrete",
-            19 => "minecraft:orange_concrete",
-            20 => "minecraft:yellow_concrete",
-            21 => "minecraft:lime_concrete",
-            22 => "minecraft:green_concrete",
-            23 => "minecraft:cyan_concrete",
-            24 => "minecraft:light_blue_concrete",
-            25 => "minecraft:blue_concrete",
-            _ => "minecraft:purple_concrete",
+            1 => ("minecraft:cyan_glazed_terracotta", Some("east")),
+            2 => ("minecraft:cyan_glazed_terracotta", Some("north")),
+            3 => ("minecraft:cyan_glazed_terracotta", Some("south")),
+            4 => ("minecraft:cyan_glazed_terracotta", Some("west")),
+            5 => ("minecraft:lime_glazed_terracotta", Some("east")),
+            6 => ("minecraft:lime_glazed_terracotta", Some("north")),
+            7 => ("minecraft:lime_glazed_terracotta", Some("south")),
+            8 => ("minecraft:lime_glazed_terracotta", Some("west")),
+            9 => ("minecraft:magenta_glazed_terracotta", Some("east")),
+            10 => ("minecraft:magenta_glazed_terracotta", Some("north")),
+            11 => ("minecraft:magenta_glazed_terracotta", Some("south")),
+            12 => ("minecraft:magenta_glazed_terracotta", Some("west")),
+            13 => ("minecraft:white_concrete", None),
+            14 => ("minecraft:light_gray_concrete", None),
+            15 => ("minecraft:gray_concrete", None),
+            16 => ("minecraft:black_concrete", None),
+            17 => ("minecraft:brown_concrete", None),
+            18 => ("minecraft:red_concrete", None),
+            19 => ("minecraft:orange_concrete", None),
+            20 => ("minecraft:yellow_concrete", None),
+            21 => ("minecraft:lime_concrete", None),
+            22 => ("minecraft:green_concrete", None),
+            23 => ("minecraft:cyan_concrete", None),
+            24 => ("minecraft:light_blue_concrete", None),
+            25 => ("minecraft:blue_concrete", None),
+            _ => ("minecraft:purple_concrete", None),
         },
     }
 }
@@ -359,8 +363,8 @@ mod tests {
         let dim = 5;
         let board = generate_board_3d(dim, bomb_amount_3d(dim), Pos3::new(0, 70, 0), &mut rng);
         for c in &board {
-            // Must not panic: every content maps to a block name.
-            let _ = revealed_block_name(c.content);
+            // Must not panic: every content maps to a block (and facing).
+            let _ = revealed_tile(c.content);
         }
     }
 
@@ -460,11 +464,16 @@ mod tests {
 
     #[test]
     fn palette_covers_big_3d_numbers() {
-        assert_eq!(revealed_block_name(CellContent::Empty), "minecraft:stone");
-        assert_eq!(revealed_block_name(CellContent::Bomb), "minecraft:tnt");
+        assert_eq!(revealed_tile(CellContent::Empty), ("minecraft:stone", None));
+        assert_eq!(revealed_tile(CellContent::Bomb), ("minecraft:tnt", None));
         for n in 0..=30u8 {
-            let name = revealed_block_name(CellContent::Number(n));
+            let (name, facing) = revealed_tile(CellContent::Number(n));
             assert!(!name.is_empty(), "no block for {n}");
+            if (1..=12).contains(&n) {
+                assert!(facing.is_some(), "tile {n} must carry a facing");
+            } else {
+                assert!(facing.is_none(), "tile {n} must not carry a facing");
+            }
         }
     }
 

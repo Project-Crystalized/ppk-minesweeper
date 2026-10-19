@@ -11,10 +11,10 @@ use pumpkin_plugin_api::{
 
 use crate::{
     core::{
-        infinite_is_bomb, infinite_number_at, revealed_block_name, CellContent, CellState, Pos3,
+        infinite_is_bomb, infinite_number_at, CellContent, CellState, Pos3,
         COVERED_BLOCK,
     },
-    helpers::{block_is, block_name, is_air, play_sound, set_block, tell, to_block_pos, uuid_key, Sound},
+    helpers::{block_is, block_name, is_air, play_sound, set_block, set_tile, tell, to_block_pos, uuid_key, Sound},
     state,
 };
 
@@ -181,7 +181,7 @@ pub fn handle_break(
         match content {
             CellContent::Bomb => {
                 board.cells.insert((x, z), CellState::Opened);
-                set_block(world, Pos3::new(x, y, z), revealed_block_name(content));
+                set_tile(world, Pos3::new(x, y, z), content);
                 Outcome::Bomb
             }
             CellContent::Empty => {
@@ -201,11 +201,7 @@ pub fn handle_break(
                         continue;
                     }
                     board.cells.insert((cx, cz), CellState::Opened);
-                    set_block(
-                        world,
-                        Pos3::new(cx, BOARD_Y, cz),
-                        revealed_block_name(content_at(cx, cz)),
-                    );
+                    set_tile(world, Pos3::new(cx, BOARD_Y, cz), content_at(cx, cz));
                     opened += 1;
                     if content_at(cx, cz) == CellContent::Empty {
                         for dz in -1..=1 {
@@ -219,7 +215,7 @@ pub fn handle_break(
             }
             CellContent::Number(_) => {
                 board.cells.insert((x, z), CellState::Opened);
-                set_block(world, Pos3::new(x, y, z), revealed_block_name(content));
+                set_tile(world, Pos3::new(x, y, z), content);
                 Outcome::Opened(1)
             }
         }
