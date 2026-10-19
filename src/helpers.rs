@@ -1,5 +1,8 @@
 //! Thin wrappers over Pumpkin world/player APIs, isolating WIT signatures.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use pumpkin_plugin_api::{
     common::BlockPos, text::TextComponent,
     wit::pumpkin::plugin::{game_rules::GameRule, world::Block, world::BlockFlags},
@@ -35,22 +38,106 @@ pub fn block_name(world: &World, pos: BlockPos) -> String {
 }
 
 pub fn set_block(world: &World, pos: Pos3, name: &str) -> bool {
-    world.set_block_by_name(to_block_pos(pos), name, update_flags())
+    // Same flags as before; going through the cached state id avoids
+    // re-marshaling the block name across the WASM->host ABI per cell.
+    match state_id(name, None) {
+        Some(id) => {
+            world.set_block_state(to_block_pos(pos), id, update_flags());
+            true
+        }
+        None => world.set_block_by_name(to_block_pos(pos), name, update_flags()),
+    }
+}
+
+/// Cheap bulk write: `set_block` measured ~5ms per skylight-occluding cell
+/// live (12.3s to build a 2D-50 board). Root cause (verified in the 0.2.0
+/// host source): the world-level path runs the light engine, six
+/// BlockPhysicsEvent dispatches and POI updates per cell. The chunk-level
+/// API is a raw voxel set that still lands in the client broadcast queue,
+/// but skips all of that.
+pub struct BulkWriter<'w> {
+    world: &'w World,
+    chunks: HashMap<(i32, i32), Option<pumpkin_plugin_api::wit::pumpkin::plugin::world::Chunk>>,
+}
+
+impl<'w> BulkWriter<'w> {
+    pub fn new(world: &'w World) -> Self {
+        Self {
+            world,
+            chunks: HashMap::new(),
+        }
+    }
+
+    /// Fallback: world-level write when the chunk API is unavailable
+    /// (unloaded chunk, unknown block). Slower, but correct.
+    pub fn set(&mut self, pos: Pos3, name: &str) {
+        let Some(id) = state_id(name, None) else {
+            set_block(self.world, pos, name);
+            return;
+        };
+        self.set_state(pos, id);
+    }
+
+    /// State-resolved variant for loops that pre-resolve (e.g. digit tiles
+    /// with `facing` variants). Falls back to the world-level per-cell write
+    /// only when the chunk is unloaded.
+    pub fn set_state(&mut self, pos: Pos3, id: u16) {
+        let (cx, lx) = (pos.x >> 4, pos.x & 15);
+        let (cz, lz) = (pos.z >> 4, pos.z & 15);
+        let chunk = self.chunks.entry((cx, cz)).or_insert_with(|| self.world.get_chunk(cx, cz));
+        let Some(chunk) = chunk else {
+            self.world.set_block_state(to_block_pos(pos), id, update_flags());
+            return;
+        };
+        chunk.set_block_state(
+            BlockPos { x: lx, y: pos.y, z: lz },
+            id,
+        );
+    }
+}
+
+/// Resolve a block state id, memoized across calls. `facing` is the optional
+/// `facing` property (used by the digit tiles). `None` means the block's
+/// default state. Names unknown to the registry return `None` so callers
+/// can fall back to `set_block_by_name`. Public wrapper for bulk loops that
+/// pre-resolve variant ids before writing.
+pub fn state_id_for(name: &str, facing: Option<&str>) -> Option<u16> {
+    state_id(name, facing)
+}
+
+/// Memoized core. Cached misses (None) are stored too, so a repeated
+/// unknown name doesn't re-demo the registry every call.
+fn state_id(name: &str, facing: Option<&str>) -> Option<u16> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<u16>>>> = OnceLock::new();
+    let key = match facing {
+        Some(face) => format!("{name}#facing={face}"),
+        None => name.to_string(),
+    };
+    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if !cache.contains_key(&key) {
+        cache.insert(key.clone(), resolve_state_id(name, facing));
+    }
+    cache[&key]
+}
+
+fn resolve_state_id(name: &str, facing: Option<&str>) -> Option<u16> {
+    let block = Block::from_name(name)?;
+    let Some(face) = facing else {
+        return Some(block.default_state_id);
+    };
+    block
+        .get_states()
+        .into_iter()
+        .find(|s| s.get_properties().iter().any(|(k, v)| k == "facing" && v == face))
+        .map(|s| s.id)
 }
 
 /// Places a specific `facing` state of a block, resolved through the block
 /// registry. Falls back to the block's default state if the lookup fails.
 pub fn set_block_facing(world: &World, pos: Pos3, name: &str, facing: &str) -> bool {
-    if let Some(block) = Block::from_name(name) {
-        let state = block.get_states().into_iter().find(|s| {
-            s.get_properties()
-                .iter()
-                .any(|(k, v)| k == "facing" && v == facing)
-        });
-        if let Some(state) = state {
-            world.set_block_state(to_block_pos(pos), state.id, update_flags());
-            return true;
-        }
+    if let Some(id) = state_id(name, Some(facing)) {
+        world.set_block_state(to_block_pos(pos), id, update_flags());
+        return true;
     }
     set_block(world, pos, name)
 }

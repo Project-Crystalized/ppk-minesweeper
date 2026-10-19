@@ -46,9 +46,7 @@ impl EventHandler<PlayerLeaveEvent> for LeaveListener {
         for game in state::remove_player_games(owner) {
             // Best effort: clear blocks in the game's world if still loaded.
             if let Some(world) = server.get_world_by_name(&game.world_id) {
-                for cell in &game.board {
-                    crate::helpers::set_block(&world, cell.pos, crate::core::AIR_BLOCK);
-                }
+                games::clear_blocks(&world, &game);
             }
         }
         event

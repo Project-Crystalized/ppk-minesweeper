@@ -156,9 +156,17 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
     let mut rng = TinyRng::new(state::next_rng_seed(owner));
     let (kind, dim, board) = cells_of(spec, origin, &mut rng);
 
+    let build_start = std::time::Instant::now();
+    let mut bulk = helpers::BulkWriter::new(&world);
     for cell in &board {
-        set_block(&world, cell.pos, COVERED_BLOCK);
+        bulk.set(cell.pos, COVERED_BLOCK);
     }
+    tracing::info!(
+        "build: {} {} cells in {:.1}ms",
+        spec.label(),
+        board.len(),
+        build_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     let id = state::insert_game(GameInstance {
         kind,
@@ -211,10 +219,20 @@ pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) 
     tell(player, &format!("Cleared {n} game(s)."));
 }
 
-fn clear_blocks(world: &World, game: &GameInstance) {
+/// Write AIR over a game's cells. Bulk (chunk-level) + timing-logged; shared
+/// by punch-clear, `/ms clear` and the leave-event cleanup.
+pub fn clear_blocks(world: &World, game: &GameInstance) {
+    let start = std::time::Instant::now();
+    let cells = game.board.len();
+    let mut bulk = helpers::BulkWriter::new(world);
     for cell in &game.board {
-        set_block(world, cell.pos, AIR_BLOCK);
+        bulk.set(cell.pos, AIR_BLOCK);
     }
+    tracing::info!(
+        "clear-writes: {} cells in {:.1}ms",
+        cells,
+        start.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 pub fn clear_game_in_world(world: &World, id: u32) {
@@ -224,9 +242,31 @@ pub fn clear_game_in_world(world: &World, id: u32) {
 }
 
 fn reveal_all(world: &World, game: &GameInstance) {
+    // Timing diagnostic: the loss reveal is our largest single write burst
+    // (dim² / dim³ tiles in one click) and had no instrumentation before.
+    let start = std::time::Instant::now();
+    let cells = game.board.len();
+    let mut bulk = helpers::BulkWriter::new(world);
     for cell in &game.board {
-        set_tile(world, cell.pos, cell.content);
+        // Digit tiles need their `facing` block state; resolve the variant
+        // ids up front so the bulk loop stays inside the cheap chunk API.
+        let (name, facing) = crate::core::revealed_tile(cell.content);
+        let id = match facing {
+            Some(face) => helpers::state_id_for(name, Some(face)),
+            None => helpers::state_id_for(name, None),
+        };
+        match id {
+            Some(id) => bulk.set_state(cell.pos, id),
+            None => {
+                let _ = set_tile(world, cell.pos, cell.content);
+            }
+        }
     }
+    tracing::info!(
+        "reveal: {} cells in {:.1}ms",
+        cells,
+        start.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
@@ -355,11 +395,11 @@ pub fn click_left(
     // Owner clicking after game over despawns the game.
     let over_owned = state::with_game(id, |g| g.is_over && g.owner == owner).unwrap_or(false);
     if over_owned {
-        let t0 = state::now_tick();
+        let start = std::time::Instant::now();
         clear_game_in_world(world, id);
         tracing::info!(
-            "clear: game #{id} took {} ticks",
-            state::now_tick().saturating_sub(t0)
+            "clear: game #{id} removal handled in {:.1}ms",
+            start.elapsed().as_secs_f64() * 1000.0
         );
         tell(player, "Game cleared. Start a new one with /ms.");
         return true;
