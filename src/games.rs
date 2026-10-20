@@ -87,14 +87,36 @@ fn within_limits(p: Pos3) -> bool {
     p.y >= MIN_BUILD_Y && p.y <= MAX_BUILD_Y
 }
 
-/// Find the first fully-free origin for the board: above head height so the
-/// player can walk underneath, and offset sideways so no cell spawns inside
-/// the player standing at `feet`.
+/// Descending lane-stop candidates below the feet: -1, -2 ... `down_to`
+/// (\(\ge\) empty when the world floor is nearer than 10 blocks). Kept as a
+/// pure function so the descending-range subtlety has a regression test.
+fn below_candidates(down_to: i32) -> Vec<i32> {
+    if down_to > -1 {
+        Vec::new()
+    } else {
+        (down_to..=-1).rev().collect()
+    }
+}
+
+/// Find the first fully-free origin for the board: strictly below the
+/// player's feet (creative flight UX — hover up, the board floats under
+/// you), scanning down at most 10 blocks. No upward fallback: standing on
+/// land with no open air below refuses to spawn. Offset sideways so no
+/// cell ever spawns inside the player at `feet`.
 fn find_origin(world: &World, feet: Pos3, spec: NewGameSpec) -> Option<Pos3> {
     let offsets = cell_offsets(spec);
-    for dy in 2..=13 {
-        // +2/+2 in x/z keeps the player's own footprint clear of cells.
-        let origin = Pos3::new(feet.x + 2, feet.y + dy, feet.z + 2);
+    // Deepest downward candidate, clamped at the build-limit floor so a
+    // player standing near world bottom can't scan below it.
+    let floor_y = (feet.y - 10).max(MIN_BUILD_Y);
+    let down_to = floor_y - feet.y;
+    // Iterate -1, -2, ... down_to. Note the range must be built ascending
+    // (down_to..=-1) before reversing: an inverted (-1..=down_to) is
+    // already empty and would silently skip the whole scan.
+    for dy in below_candidates(down_to) {
+        // -2/-2 in x/z anchors the board under your feet: the closest cell
+        // column sits 2 blocks behind your position, the rest extends into
+        // +x/+z. In flight the board's near corner is directly below you.
+        let origin = Pos3::new(feet.x - 2, feet.y + dy, feet.z - 2);
         if !within_limits(origin) {
             continue;
         }
@@ -146,7 +168,7 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
         tell(
             player,
             &format!(
-                "No free space in the 12 blocks above your feet ({}, {}, {}). Go somewhere with open sky.",
+                "No free space within 10 blocks below your feet ({}, {}, {}). Fly up a bit; boards only spawn in open air below you.",
                 feet.x, feet.y, feet.z
             ),
         );
@@ -725,6 +747,15 @@ pub fn toggle_lock_report(who: crate::state::UuidKey, id: Option<u32>) -> String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn below_candidates_descend_order() {
+        assert_eq!(super::below_candidates(-10), vec![-1, -2, -3, -4, -5, -6, -7, -8, -9, -10]);
+        assert_eq!(super::below_candidates(-1), vec![-1]);
+        // Floor nearer than 10 blocks: only the layers above it remain;
+        // down_to >= 0 means no room below at all.
+        assert!(super::below_candidates(0).is_empty());
+    }
+
     use super::*;
     use crate::core::Cell;
 
