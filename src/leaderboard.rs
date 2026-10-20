@@ -31,20 +31,53 @@ struct Board {
     title: &'static str,
     mode: &'static str,
     dim: usize,
+    /// What the lines rank: fastest win times or most games finished.
+    kind: BoardKind,
+    /// Fixed text orientation (see `Facing`).
+    facing: Facing,
     x: f64,
     y: f64,
     z: f64,
 }
 
-/// Hardcoded boards: 2D 50x50 at (4, 2, 29), 3D 7x7 at (-12, 2, 29).
+#[derive(Clone, Copy, PartialEq)]
+enum BoardKind {
+    FastestWins,
+    MostGames,
+}
+
+/// Fixed text orientation. The display's default fixed plane faces south
+/// (+Z); these are 180°/90° rotations about Y applied on top.
+#[derive(Clone, Copy, PartialEq)]
+enum Facing {
+    North,
+    East,
+}
+
+impl Facing {
+    /// Left-rotation quaternion for the display transformation.
+    fn quaternion(self) -> (f32, f32, f32, f32) {
+        match self {
+            // 180° about Y.
+            Facing::North => (0.0, 1.0, 0.0, 0.0),
+            // +90° about Y takes +Z (south) to +X (east).
+            Facing::East => (0.0, 0.7071, 0.0, 0.7071),
+        }
+    }
+}
+
+/// Hardcoded boards, all in one row at z=29 (16-block x spacing):
+/// fastest-wins and most-games pairs for the two preset specs.
 /// Line 0 is the header at the TOP; entries stack downward from it.
 /// Edit the numbers to move a board.
-const BOARDS: [Board; 2] = [
+const BOARDS: [Board; 4] = [
     Board {
         tag: "ms_lb_2d50",
         title: "2D 50x50 All-Time Best",
         mode: "2D",
         dim: 50,
+        kind: BoardKind::FastestWins,
+        facing: Facing::North,
         x: 4.0,
         y: 2.0,
         z: 29.0,
@@ -54,9 +87,33 @@ const BOARDS: [Board; 2] = [
         title: "3D 7x7x7 All-Time Best",
         mode: "3D",
         dim: 7,
+        kind: BoardKind::FastestWins,
+        facing: Facing::North,
         x: -12.0,
         y: 2.0,
         z: 29.0,
+    },
+    Board {
+        tag: "ms_lb_2d50_games",
+        title: "2D 50x50 Most Games Finished",
+        mode: "2D",
+        dim: 50,
+        kind: BoardKind::MostGames,
+        facing: Facing::East,
+        x: -26.0,
+        y: 2.0,
+        z: 9.0,
+    },
+    Board {
+        tag: "ms_lb_3d7_games",
+        title: "3D 7x7x7 Most Games Finished",
+        mode: "3D",
+        dim: 7,
+        kind: BoardKind::MostGames,
+        facing: Facing::East,
+        x: -27.0,
+        y: 2.0,
+        z: -17.0,
     },
 ];
 
@@ -90,13 +147,22 @@ fn board_world(server: &Server) -> Option<World> {
     None
 }
 
-/// Rendered text block for one board: gold header + fastest wins or
-/// placeholders, newline-separated into a single display.
+/// Rendered text block for one board: gold header + top 10 lines,
+/// newline-separated into a single display. Placeholder lines fill the
+/// empty tail so the board keeps its size before anyone plays.
 fn board_text(board: &Board) -> String {
     let mut lines = vec![format!("§6§l{}", board.title)];
-    let top = crate::db::top_spec_wins(board.mode, board.dim, 10);
-    for (i, w) in top.iter().enumerate() {
-        lines.push(format!("§f{}. {} - {}s", i + 1, w.owner_name, w.secs));
+    match board.kind {
+        BoardKind::FastestWins => {
+            for (i, w) in crate::db::top_spec_wins(board.mode, board.dim, 10).iter().enumerate() {
+                lines.push(format!("§f{}. {} - {}s", i + 1, w.owner_name, w.secs));
+            }
+        }
+        BoardKind::MostGames => {
+            for (i, w) in crate::db::top_spec_games(board.mode, board.dim, 10).iter().enumerate() {
+                lines.push(format!("§f{}. {} - {} games", i + 1, w.owner_name, w.games));
+            }
+        }
     }
     while lines.len() < LINES_PER_BOARD {
         lines.push("§7—. ---".to_string());
@@ -114,15 +180,14 @@ fn fresh_cycle() -> &'static Mutex<HashSet<&'static str>> {
     FRESH.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn style_new_display(display: &TextDisplayEntity) {
+fn style_new_display(display: &TextDisplayEntity, facing: Facing) {
     display.set_alignment(TextAlignment::Center);
     // Fixed orientation: the board never rotates to face the player.
     display.get_display().set_billboard(BillboardMode::Fixed);
-    // Text faces north: flip the entity's default (south) plane 180°.
+    // Orientation flip on top of the display's default (south) plane.
+    let (x, y, z, w) = facing.quaternion();
     display.get_display().set_transformation(
-        TransformationBuilder::new()
-            .left_rotation(0.0, 1.0, 0.0, 0.0)
-            .build(),
+        TransformationBuilder::new().left_rotation(x, y, z, w).build(),
     );
     // Full-light override: the boards sit low (y=2) where the sampled light
     // is near zero, rendering the text dark. Vanilla packs block/sky light
@@ -198,7 +263,7 @@ fn refresh_board(world: &World, board: &Board) {
         Some(entity) => {
             if let Some(display) = TextDisplayEntity::from_entity(&entity) {
                 // Re-style every refresh so orientation changes converge.
-                style_new_display(&display);
+                style_new_display(&display, board.facing);
                 display.set_text(TextComponent::from_legacy_string(&text));
             } else {
                 // Tagged entity is not a text display (foreign tag
@@ -217,7 +282,7 @@ fn spawn_board_display(world: &World, board: &Board, pos: (f64, f64, f64), text:
     entity.set_custom_name(TextComponent::text(board.tag));
     entity.set_custom_name_visible(false);
     if let Some(display) = TextDisplayEntity::from_entity(&entity) {
-        style_new_display(&display);
+        style_new_display(&display, board.facing);
         display.set_text(TextComponent::from_legacy_string(text));
     } else {
         tracing::warn!("leaderboard: spawned entity did not cast to text display");

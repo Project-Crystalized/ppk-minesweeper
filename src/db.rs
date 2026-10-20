@@ -365,6 +365,37 @@ pub fn top_spec_wins(mode: &str, dim: usize, limit: usize) -> Vec<TopWin> {
     with_conn(|c| top_spec_wins_in(c, mode, dim, limit)).unwrap_or_default()
 }
 
+pub struct TopGames {
+    pub owner_name: String,
+    pub games: u64,
+}
+
+/// Most games finished for one exact board spec (mode + dim), all-time.
+/// Every row in `MsBoxGames` is a finished game (rows are written on game
+/// end, win or loss), so a plain count per owner is the leaderboard. The
+/// name shown is the owner's most recent one (MAX over the group).
+pub fn top_spec_games_in(conn: &Connection, mode: &str, dim: usize, limit: usize) -> Vec<TopGames> {
+    let mut stmt = match conn.prepare(
+        "SELECT MAX(owner_name), COUNT(*) FROM MsBoxGames \
+         WHERE mode = ? AND dim = ? GROUP BY owner_uuid \
+         ORDER BY COUNT(*) DESC LIMIT ?;",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(params![mode, dim as i64, limit as i64], |row| {
+        Ok(TopGames {
+            owner_name: row.get::<_, String>(0)?,
+            games: row.get::<_, i64>(1)? as u64,
+        })
+    });
+    rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
+}
+
+pub fn top_spec_games(mode: &str, dim: usize, limit: usize) -> Vec<TopGames> {
+    with_conn(|c| top_spec_games_in(c, mode, dim, limit)).unwrap_or_default()
+}
+
 pub struct TopInfinite {
     pub name: String,
     pub top: usize,
@@ -478,6 +509,28 @@ mod tests {
         assert!(top_spec_wins_in(&conn, "2D", 30, 10).is_empty());
         assert_eq!(top_spec_wins_in(&conn, "3D", 7, 10).len(), 1);
         assert_eq!(top_spec_wins_in(&conn, "2D", 50, 1).len(), 1);
+        dropdb(&path);
+    }
+
+    #[test]
+    fn spec_games_count_ranks_and_filters() {
+        let (conn, path) = memdb();
+        // "Grinder" finishes three 2D-50 games (any outcome), "Fast" one.
+        record_box_game_in(&conn, 50, "2D", 3000, true, (1, 1), "Grinder", &[]).unwrap();
+        record_box_game_in(&conn, 50, "2D", 1000, true, (1, 1), "Grinder", &[]).unwrap();
+        record_box_game_in(&conn, 50, "2D", 100, false, (1, 1), "Grinder", &[]).unwrap();
+        record_box_game_in(&conn, 50, "2D", 2000, true, (2, 2), "Fast", &[]).unwrap();
+        record_box_game_in(&conn, 7, "3D", 500, true, (3, 3), "Cube", &[]).unwrap();
+        let top = top_spec_games_in(&conn, "2D", 50, 10);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].owner_name, "Grinder");
+        assert_eq!(top[0].games, 3);
+        assert_eq!(top[1].owner_name, "Fast");
+        assert_eq!(top[1].games, 1);
+        // Other specs never leak in.
+        assert_eq!(top_spec_games_in(&conn, "3D", 7, 10)[0].games, 1);
+        assert!(top_spec_games_in(&conn, "2D", 30, 10).is_empty());
+        assert_eq!(top_spec_games_in(&conn, "2D", 50, 1).len(), 1);
         dropdb(&path);
     }
 
