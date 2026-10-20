@@ -1,9 +1,11 @@
 //! In-world leaderboards: one big multi-line text display entity per board
 //! at hardcoded spots, refreshed from SQLite. Stateless by design: each
-//! board is tagged with a custom name, so refresh finds and reuses its
-//! display (or spawns it). That also heals server restarts without leaving
-//! ghosts, mirroring how the old server rebuilt its armor-stand boards on
-//! a timer.
+//! board is tagged with a custom name. On the first refresh after load
+//! every text display within a radius of the board's spot is wiped
+//! (leftovers, legacy boards, stacks — tags may not survive restarts) and a
+//! fresh display is spawned; later refreshes only re-style/re-text the
+//! tagged keeper. That heals server restarts without leaving ghosts,
+//! mirroring how the old server rebuilt its armor-stand boards on a timer.
 
 use std::{
     collections::HashSet,
@@ -12,7 +14,7 @@ use std::{
 
 use pumpkin_plugin_api::{
     text::TextComponent, BillboardMode, EntityType, Server, TextAlignment, TextDisplayEntity,
-    World,
+    TransformationBuilder, World,
 };
 
 /// Preferred world; falls back to the first loaded world when the server
@@ -34,7 +36,7 @@ struct Board {
     z: f64,
 }
 
-/// Hardcoded boards: 2D 50x50 at (4, 2, 27), 3D 7x7 at (-12, 2, 27).
+/// Hardcoded boards: 2D 50x50 at (4, 2, 29), 3D 7x7 at (-12, 2, 29).
 /// Line 0 is the header at the TOP; entries stack downward from it.
 /// Edit the numbers to move a board.
 const BOARDS: [Board; 2] = [
@@ -45,7 +47,7 @@ const BOARDS: [Board; 2] = [
         dim: 50,
         x: 4.0,
         y: 2.0,
-        z: 27.0,
+        z: 29.0,
     },
     Board {
         tag: "ms_lb_3d7",
@@ -54,7 +56,7 @@ const BOARDS: [Board; 2] = [
         dim: 7,
         x: -12.0,
         y: 2.0,
-        z: 27.0,
+        z: 29.0,
     },
 ];
 
@@ -103,112 +105,112 @@ fn board_text(board: &Board) -> String {
     lines.join("\n")
 }
 
+/// First-refresh trackers: on the very first refresh after load each board
+/// ignores its existing displays and spawns completely fresh ones. This
+/// self-heals any stale metadata (invisible-text corruption from older
+/// sessions) every restart.
+fn fresh_cycle() -> &'static Mutex<HashSet<&'static str>> {
+    static FRESH: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    FRESH.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 fn style_new_display(display: &TextDisplayEntity) {
     display.set_alignment(TextAlignment::Center);
     // Fixed orientation: the board never rotates to face the player.
     display.get_display().set_billboard(BillboardMode::Fixed);
+    // Text faces north: flip the entity's default (south) plane 180°.
+    display.get_display().set_transformation(
+        TransformationBuilder::new()
+            .left_rotation(0.0, 1.0, 0.0, 0.0)
+            .build(),
+    );
+    // Full-light override: the boards sit low (y=2) where the sampled light
+    // is near zero, rendering the text dark. Vanilla packs block/sky light
+    // as two 4-bit nibbles; 255 sets both to 15 regardless of nibble order.
+    display.get_display().set_brightness(255);
 }
 
-/// Squared adoption radius: untagged text displays within a block of our
-/// hardcoded coords count as ours (their tags may not survive restarts).
-const ADOPT_DIST2: f64 = 1.0;
+/// Squared wipe radius around a board's spot: at boot, every text display
+/// inside it is removed (leftovers/legacy/stacked boards). The two boards
+/// are 16 blocks apart, so a 6-block radius never crosses between them.
+const WIPE_DIST2: f64 = 36.0;
 
 fn dist2(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
     (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)
 }
 
-/// Reconcile one board: exactly one display must exist at our coords.
-/// Matching is by tag first, then by position: custom names may not survive
-/// a restart on all hosts, in which case the persisted set comes back
-/// untagged and tag-only matching would spawn a fresh set next to it every
-/// restart (the stacking bug). An untagged text display within a block of
-/// our hardcoded coords is ours; anything else is left alone.
+/// Remove every text display within [`WIPE_DIST2`] of `pos`. Returns the
+/// count. Boot-time only: during live refreshes, tag-only matching keeps
+/// unrelated displays around it untouched.
+fn wipe_area(world: &World, pos: (f64, f64, f64)) -> usize {
+    let mut removed = 0;
+    for entity in world.get_entities() {
+        if TextDisplayEntity::from_entity(&entity).is_some()
+            && dist2(entity.get_position(), pos) <= WIPE_DIST2
+        {
+            entity.remove();
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Reconcile one board: exactly one tagged display must exist at our coords.
 fn refresh_board(world: &World, board: &Board) {
-    let legacy_prefix = format!("{}_", board.tag);
     let pos = (board.x, board.y, board.z);
     let text = board_text(board);
-
-    // keeper index + whether it already carries our tag
-    let mut keeper: Option<usize> = None;
-    let mut keeper_tagged = false;
-    // all candidates to collapse (tagged ours + untagged lookalikes)
-    let mut dups: Vec<usize> = Vec::new();
-    let entities = world.get_entities();
-    let mut known: Vec<(Option<String>, pumpkin_plugin_api::Entity)> = Vec::new();
-    for entity in entities {
-        let name = entity.get_custom_name().map(|c| c.get_text());
-        let tagged = name.as_deref() == Some(board.tag);
-        let legacy = name
-            .as_deref()
-            .is_some_and(|n| n.starts_with(&legacy_prefix));
-        let lookalike = name.is_none()
-            && TextDisplayEntity::from_entity(&entity).is_some()
-            && dist2(entity.get_position(), pos) <= ADOPT_DIST2;
-        if tagged || legacy || lookalike {
-            known.push((name, entity));
-        }
+    // Buried-check: a display inside solid blocks renders as nothing.
+    {
+        let at = pumpkin_plugin_api::common::BlockPos {
+            x: board.x as i32,
+            y: board.y as i32,
+            z: board.z as i32,
+        };
+        let block = crate::helpers::block_name(world, at);
+        tracing::info!("leaderboard: {} sits in {:?}", board.tag, block);
     }
-    // Prefer the tagged keeper; otherwise adopt the closest lookalike.
-    let mut best_dist = f64::INFINITY;
-    for (k, (name, entity)) in known.iter().enumerate() {
-        if name.as_deref() == Some(board.tag) {
-            if keeper.is_none() {
-                keeper = Some(k);
-                keeper_tagged = true;
-            } else {
-                dups.push(k);
-            }
-            continue;
-        }
-        if keeper_tagged {
-            // A tagged keeper owns the spot: everything else goes.
-            dups.push(k);
-            continue;
-        }
-        if name.is_some() {
-            // Legacy per-line display: always removed, never adopted.
-            dups.push(k);
-            continue;
-        }
-        // No tagged keeper: adopt the closest untagged lookalike.
-        let (ex, ey, ez) = entity.get_position();
-        let d = (ex - pos.0).powi(2) + (ey - pos.1).powi(2) + (ez - pos.2).powi(2);
-        if d < best_dist {
-            if let Some(prev) = keeper {
-                dups.push(prev);
-            }
-            keeper = Some(k);
-            best_dist = d;
-        } else {
-            dups.push(k);
-        }
-    }
-    if let Some(k) = keeper {
-        let entity = &known[k].1;
-        if let Some(display) = TextDisplayEntity::from_entity(entity) {
-            // Style every refresh (not just at spawn) so orientation
-            // changes converge on already-placed displays.
-            style_new_display(&display);
-            display.set_text(TextComponent::from_legacy_string(&text));
-            // Retag adopted lookalikes so later cycles match by tag, and
-            // reposition every refresh so layout changes migrate live
-            // displays instead of mixing old and new positions.
-            if known[k].0.as_deref() != Some(board.tag) {
-                entity.set_custom_name(TextComponent::text(board.tag));
-                entity.set_custom_name_visible(false);
-            }
-            let w = entity.get_world();
-            entity.teleport(pos, w);
-        } else {
-            // Tagged entity is not a text display (foreign tag collision):
-            // drop it and respawn below.
-            entity.remove();
-            spawn_board_display(world, board, pos, &text);
-        }
-    } else {
+    let forced_fresh = fresh_cycle()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(board.tag);
+    if forced_fresh {
+        // Boot: wipe every text display near the spot (leftovers, legacy
+        // boards, stacks — tags may not survive restarts) and spawn fresh.
+        let removed = wipe_area(world, pos);
         spawn_board_display(world, board, pos, &text);
+        tracing::info!(
+            "leaderboard: {} fresh spawn (wiped {} leftover display(s))",
+            board.tag,
+            removed
+        );
+        return;
+    }
+    // Live refresh: tag-only matching — spawns always carry the tag, so
+    // anything untagged can't be ours (the boot wipe already removed strays).
+    let mut keeper = None;
+    for entity in world.get_entities() {
+        if entity.get_custom_name().map(|c| c.get_text()).as_deref() == Some(board.tag) {
+            keeper = Some(entity);
+            break;
+        }
+    }
+    match keeper {
+        Some(entity) => {
+            if let Some(display) = TextDisplayEntity::from_entity(&entity) {
+                // Re-style every refresh so orientation changes converge.
+                style_new_display(&display);
+                display.set_text(TextComponent::from_legacy_string(&text));
+            } else {
+                // Tagged entity is not a text display (foreign tag
+                // collision): drop it and respawn.
+                entity.remove();
+                spawn_board_display(world, board, pos, &text);
+            }
+        }
+        None => spawn_board_display(world, board, pos, &text),
     }
 }
+
 
 fn spawn_board_display(world: &World, board: &Board, pos: (f64, f64, f64), text: &str) {
     let entity = world.spawn_entity(EntityType::TextDisplay, pos);
