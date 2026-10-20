@@ -150,17 +150,40 @@ fn board_world(server: &Server) -> Option<World> {
 /// Rendered text block for one board: gold header + top 10 lines,
 /// newline-separated into a single display. Placeholder lines fill the
 /// empty tail so the board keeps its size before anyone plays.
+/// TEMP: render fake entries instead of DB rows so the boards can be
+/// visually checked (facing, brightness, layout) without polluting real
+/// stats. Flip to false before shipping.
+const DEMO_DATA: bool = true;
+
 fn board_text(board: &Board) -> String {
     let mut lines = vec![format!("§6§l{}", board.title)];
-    match board.kind {
-        BoardKind::FastestWins => {
-            for (i, w) in crate::db::top_spec_wins(board.mode, board.dim, 10).iter().enumerate() {
-                lines.push(format!("§f{}. {} - {}s", i + 1, w.owner_name, w.secs));
-            }
+    if DEMO_DATA {
+        const NAMES: [&str; 10] = [
+            "Notch", "Herobrine", "Steve", "Alex", "Creeper", "Enderman", "Zombie", "Skeleton",
+            "Villager", "Piglin",
+        ];
+        for (i, name) in NAMES.iter().enumerate() {
+            let value = match board.kind {
+                BoardKind::FastestWins => format!("{}s", 321 - i * 27),
+                BoardKind::MostGames => format!("{} games", 42 - i * 3),
+            };
+            lines.push(format!("§f{}. {} - {}", i + 1, name, value));
         }
-        BoardKind::MostGames => {
-            for (i, w) in crate::db::top_spec_games(board.mode, board.dim, 10).iter().enumerate() {
-                lines.push(format!("§f{}. {} - {} games", i + 1, w.owner_name, w.games));
+    } else {
+        match board.kind {
+            BoardKind::FastestWins => {
+                for (i, w) in
+                    crate::db::top_spec_wins(board.mode, board.dim, 10).iter().enumerate()
+                {
+                    lines.push(format!("§f{}. {} - {}s", i + 1, w.owner_name, w.secs));
+                }
+            }
+            BoardKind::MostGames => {
+                for (i, w) in
+                    crate::db::top_spec_games(board.mode, board.dim, 10).iter().enumerate()
+                {
+                    lines.push(format!("§f{}. {} - {} games", i + 1, w.owner_name, w.games));
+                }
             }
         }
     }
@@ -204,20 +227,34 @@ fn dist2(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
     (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)
 }
 
-/// Remove every text display within [`WIPE_DIST2`] of `pos`. Returns the
-/// count. Boot-time only: during live refreshes, tag-only matching keeps
-/// unrelated displays around it untouched.
-fn wipe_area(world: &World, pos: (f64, f64, f64)) -> usize {
+/// Remove every text display within [`WIPE_DIST2`] of `pos` whose custom
+/// name is not in `keep`. `keep` empty = boot wipe (removes our own stale
+/// keepers too); live refreshes pass all board tags so only strays die.
+/// Entities in unloaded chunks are invisible here (they arrive with their
+/// chunk, so this re-runs every refresh until the area stays clean).
+fn wipe_area(world: &World, pos: (f64, f64, f64), keep: &[&'static str]) -> usize {
     let mut removed = 0;
     for entity in world.get_entities() {
-        if TextDisplayEntity::from_entity(&entity).is_some()
-            && dist2(entity.get_position(), pos) <= WIPE_DIST2
+        if TextDisplayEntity::from_entity(&entity).is_none()
+            || dist2(entity.get_position(), pos) > WIPE_DIST2
         {
-            entity.remove();
-            removed += 1;
+            continue;
         }
+        let named = entity.get_custom_name().map(|c| c.get_text().to_string());
+        if named
+            .as_deref()
+            .is_some_and(|n| keep.iter().any(|k| *k == n))
+        {
+            continue;
+        }
+        entity.remove();
+        removed += 1;
     }
     removed
+}
+
+fn board_tags() -> Vec<&'static str> {
+    BOARDS.iter().map(|b| b.tag).collect()
 }
 
 /// Reconcile one board: exactly one tagged display must exist at our coords.
@@ -241,7 +278,7 @@ fn refresh_board(world: &World, board: &Board) {
     if forced_fresh {
         // Boot: wipe every text display near the spot (leftovers, legacy
         // boards, stacks — tags may not survive restarts) and spawn fresh.
-        let removed = wipe_area(world, pos);
+        let removed = wipe_area(world, pos, &[]);
         spawn_board_display(world, board, pos, &text);
         tracing::info!(
             "leaderboard: {} fresh spawn (wiped {} leftover display(s))",
@@ -251,7 +288,20 @@ fn refresh_board(world: &World, board: &Board) {
         return;
     }
     // Live refresh: tag-only matching — spawns always carry the tag, so
-    // anything untagged can't be ours (the boot wipe already removed strays).
+    // keeper identification is by name alone. Then a stray wipe: leftovers
+    // that surfaced with a late chunk load (entities persist inside chunk
+    // saves, so they're invisible until their chunk streams in) get removed
+    // here, while every tagged keeper — ours and the other boards' — is
+    // protected by name.
+    let keep = board_tags();
+    let wiped = wipe_area(world, pos, &keep);
+    if wiped > 0 {
+        tracing::info!(
+            "leaderboard: {} stray wipe removed {} display(s)",
+            board.tag,
+            wiped
+        );
+    }
     let mut keeper = None;
     for entity in world.get_entities() {
         if entity.get_custom_name().map(|c| c.get_text()).as_deref() == Some(board.tag) {
