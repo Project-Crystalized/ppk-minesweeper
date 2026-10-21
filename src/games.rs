@@ -632,6 +632,8 @@ pub fn click_right(world: &World, player: &Player, id: u32, idx: usize) -> bool 
     }
 }
 
+/// Plain-text status used by the unit tests (`#[cfg(test)]`).
+#[allow(dead_code)]
 pub fn status_line(id: u32) -> Option<String> {
     state::with_game(id, |g| {
         format!(
@@ -650,32 +652,6 @@ pub fn status_line(id: u32) -> Option<String> {
             },
             if g.locked { "  [Locked]" } else { "" },
         )
-    })
-}
-
-/// Colored action-bar component mirroring the old Valence palette:
-/// aqua time, red bombs, gold flags, obfuscated brackets. Built via legacy
-/// `§` codes because the WIT style methods consume the component.
-pub fn status_component(id: u32) -> Option<pumpkin_plugin_api::text::TextComponent> {
-    use pumpkin_plugin_api::text::TextComponent;
-    state::with_game(id, |g| {
-        let mut extra = String::new();
-        if g.is_over {
-            extra.push_str(if g.is_won {
-                " §aWON! Click your board to clear."
-            } else {
-                " §cBOOM! Click your board to clear."
-            });
-        }
-        if g.locked {
-            extra.push_str(" §7[Locked]");
-        }
-        TextComponent::from_legacy_string(&format!(
-            "§kA§r §bTime: {} §r §cBombs: {} §r §6Flags: {}§r{extra}",
-            g.comp_time_ticks / 20,
-            g.bomb_total(),
-            g.flag_count(),
-        ))
     })
 }
 

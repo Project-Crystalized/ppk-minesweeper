@@ -1,11 +1,10 @@
 //! Per-tick driver: a fast 1-tick counter for cooldowns plus the existing
-//! per-second work (game timers, action bars, lock cleanup).
+//! per-second work (game timers, sidebar status, lock cleanup).
 
 use pumpkin_plugin_api::{scheduler::SchedulerExt, Context, Server};
 
 use crate::{
-    games,
-    helpers::{action_bar, uuid_key},
+    helpers::uuid_key,
     state,
 };
 
@@ -80,19 +79,12 @@ fn tick(server: Server) {
             }
         }
         let show_id = best.map(|(_, id, _)| id).or(mine_first);
-        if let Some(id) = show_id {
-            if let Some(comp) = games::status_component(id) {
-                crate::helpers::action_bar_component(&player, comp);
-                continue;
-            }
-            if let Some(line) = games::status_line(id) {
-                let extra = if mine_count > 1 {
-                    format!(" (+{} more, /ms list)", mine_count - 1)
-                } else {
-                    String::new()
-                };
-                action_bar(&player, &format!("{line}{extra}"));
-            }
+        match show_id {
+            Some(id) => crate::sidebar::show(
+                &player,
+                crate::sidebar::status_lines(id, mine_count),
+            ),
+            None => crate::sidebar::clear(&player),
         }
     }
 }

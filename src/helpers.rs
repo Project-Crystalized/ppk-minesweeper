@@ -185,10 +185,6 @@ pub fn tell(player: &Player, text: &str) {
     player.send_system_message(msg(text), false);
 }
 
-pub fn action_bar(player: &Player, text: &str) {
-    player.send_system_message(msg(text), true);
-}
-
 pub fn action_bar_component(player: &Player, comp: TextComponent) {
     player.send_system_message(comp, true);
 }
