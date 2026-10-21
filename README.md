@@ -9,9 +9,7 @@ inside Pumpkin instead of as its own server.
 | Command | Effect |
 |---|---|
 | `/ms help` | Show help |
-| `/ms 2d20` / `2d30` / `2d50` | Start a flat board at the first free layer above your feet |
 | `/ms 2d <size>` | Start a flat board with custom dimension (2+) |
-| `/ms 3d5` / `3d7` / `3d10` | Start a 3D cube (3-block spacing) |
 | `/ms 3d <size>` | Start a 3D cube with custom dimension (2+) |
 | `/ms lock [id]` | Lock/unlock your games (or right-click the horse-armor item) |
 | `/ms flag` | Cycle flag wool color (or right-click the wool item) |
@@ -107,3 +105,7 @@ permission (unless blocked in server config, the manifest request applies).
 - [ ] Finished games show up in `data/minesweeper.sql` (`sqlite3` CLI);
   `/ms stats` + `/ms top` read them back; infinite totals survive restart
 - [ ] Empty `register_command` permission (`""`) is accepted by the host
+
+## License
+
+GPL-3.0-or-later — see [`LICENSE`](./LICENSE) (GNU GPL v3, 29 June 2007).

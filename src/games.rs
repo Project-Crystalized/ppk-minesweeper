@@ -62,7 +62,7 @@ impl NewGameSpec {
     }
 
     pub fn all_labels() -> &'static str {
-        "2d20, 2d30, 2d50, 3d5, 3d7, 3d10, or /ms 2d <size> / 3d <size> (2+)"
+        "/ms 2d <size> / 3d <size> (2+)"
     }
 }
 

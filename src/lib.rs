@@ -88,38 +88,13 @@ impl Plugin for MinesweeperPlugin {
             true,
         )?;
 
-        use games::NewGameSpec as Spec;
         use pumpkin_plugin_api::command::ArgumentType;
         let cmd = Command::new(&["ms".to_string()], "Play minesweeper")
             .then(CommandNode::literal("help").execute(commands::HelpCommand))
-            .then(
-                CommandNode::literal("2d20")
-                    .execute(commands::NewGameCommand { spec: Spec::TWO_D_20 }),
-            )
-            .then(
-                CommandNode::literal("2d30")
-                    .execute(commands::NewGameCommand { spec: Spec::TWO_D_30 }),
-            )
-            .then(
-                CommandNode::literal("2d50")
-                    .execute(commands::NewGameCommand { spec: Spec::TWO_D_50 }),
-            )
             .then(CommandNode::literal("2d").then(
                 CommandNode::argument("size", &ArgumentType::Integer((None, None)))
                     .execute(commands::NewGame2dCommand),
             ))
-            .then(
-                CommandNode::literal("3d5")
-                    .execute(commands::NewGameCommand { spec: Spec::THREE_D_5 }),
-            )
-            .then(
-                CommandNode::literal("3d7")
-                    .execute(commands::NewGameCommand { spec: Spec::THREE_D_7 }),
-            )
-            .then(
-                CommandNode::literal("3d10")
-                    .execute(commands::NewGameCommand { spec: Spec::THREE_D_10 }),
-            )
             .then(CommandNode::literal("3d").then(
                 CommandNode::argument("size", &ArgumentType::Integer((None, None)))
                     .execute(commands::NewGame3dCommand),

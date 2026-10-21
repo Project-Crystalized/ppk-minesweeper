@@ -52,27 +52,6 @@ impl CommandHandler for RootCommand {
     }
 }
 
-pub struct NewGameCommand {
-    pub spec: NewGameSpec,
-}
-
-impl CommandHandler for NewGameCommand {
-    fn handle(
-        &self,
-        sender: CommandSender,
-        _server: Server,
-        _args: ConsumedArgs,
-    ) -> Result<i32, CommandError> {
-        info!("/ms {} from {}", self.spec.label(), sender.get_name());
-        let Some(player) = player_of(&sender) else {
-            sender.send_error(TextComponent::text("Only players can start games."));
-            return Ok(0);
-        };
-        crate::games::create_game(&player, self.spec);
-        Ok(1)
-    }
-}
-
 fn parse_size(args: &ConsumedArgs) -> Option<i32> {
     match args.get_value("size") {
         Arg::Num(Ok(Number::Int32(n))) => Some(n),
