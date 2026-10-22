@@ -40,7 +40,10 @@ fn tick(server: Server) {
         crate::leaderboard::refresh(&server);
     }
 
-    for player in server.get_all_players() {
+    let players = server.get_all_players();
+    let online = players.len();
+    let games = state::all_games_detailed();
+    for player in players {
         let key = uuid_key(&player);
         // Tripwire for the first-click pitch snap: log if anyone's view is
         // ever near-vertical server-side.
@@ -53,38 +56,39 @@ fn tick(server: Server) {
                 pitch
             );
         }
+
+        let world = player.get_world();
+        let infinite = crate::infinite::is_infinite_world(&world);
         // Show the nearest board (any owner), like the old server's
         // `show_action_bar` which picked the closest `ActionState.center`.
         // Falls back to the player's own first game when worlds differ.
         let (px, py, pz) = player.get_position();
-        let mut best: Option<(f64, u32, usize)> = None;
+        let mut best: Option<(f64, u32)> = None;
         let mut mine_first: Option<u32> = None;
         let mut mine_count = 0usize;
-        for g in state::all_games_detailed() {
-            if g.owner == key {
-                mine_count += 1;
-                mine_first.get_or_insert(g.id);
-            }
-            // Only boards in the player's current world compete by distance.
-            let world = player.get_world();
-            if world.get_id() != g.world_id {
-                continue;
-            }
-            let dx = g.center.x as f64 - px;
-            let dy = g.center.y as f64 - py;
-            let dz = g.center.z as f64 - pz;
-            let d2 = dx * dx + dy * dy + dz * dz;
-            if best.is_none_or(|(bd, _, _)| d2 < bd) {
-                best = Some((d2, g.id, 0));
+        if !infinite {
+            for g in &games {
+                if g.owner == key {
+                    mine_count += 1;
+                    mine_first.get_or_insert(g.id);
+                }
+                // Only boards in the player's current world compete by distance.
+                if world.get_id() != g.world_id {
+                    continue;
+                }
+                let dx = g.center.x as f64 - px;
+                let dy = g.center.y as f64 - py;
+                let dz = g.center.z as f64 - pz;
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if best.is_none_or(|(bd, _)| d2 < bd) {
+                    best = Some((d2, g.id));
+                }
             }
         }
-        let show_id = best.map(|(_, id, _)| id).or(mine_first);
-        match show_id {
-            Some(id) => crate::sidebar::show(
-                &player,
-                crate::sidebar::status_lines(id, mine_count),
-            ),
-            None => crate::sidebar::clear(&player),
-        }
+        let show_id = best.map(|(_, id)| id).or(mine_first);
+        crate::sidebar::show(
+            &player,
+            crate::sidebar::lines(&player, show_id, mine_count, online, infinite),
+        );
     }
 }

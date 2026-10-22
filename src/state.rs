@@ -390,7 +390,7 @@ pub fn flag_style_name(owner: UuidKey) -> &'static str {
 // Infinite-mode sessions (in-memory only, per the no-persistence decision)
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct InfiniteSession {
     pub current_streak: usize,
     pub top_streak: usize,
@@ -406,6 +406,14 @@ fn sessions() -> &'static Mutex<HashMap<UuidKey, InfiniteSession>> {
 pub fn with_session_mut<R>(owner: UuidKey, f: impl FnOnce(&mut InfiniteSession) -> R) -> R {
     let mut s = sessions().lock().unwrap_or_else(|e| e.into_inner());
     f(s.entry(owner).or_default())
+}
+
+pub fn session(owner: UuidKey) -> Option<InfiniteSession> {
+    sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&owner)
+        .copied()
 }
 
 /// Shared infinite board state: cells that are no longer `Closed`.

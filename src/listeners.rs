@@ -43,6 +43,7 @@ impl EventHandler<PlayerLeaveEvent> for LeaveListener {
         event: EventData<PlayerLeaveEvent>,
     ) -> EventData<PlayerLeaveEvent> {
         let owner = uuid_key(&event.player);
+        crate::sidebar::clear(&event.player);
         for game in state::remove_player_games(owner) {
             // Best effort: clear blocks in the game's world if still loaded.
             if let Some(world) = server.get_world_by_name(&game.world_id) {
