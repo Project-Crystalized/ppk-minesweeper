@@ -18,7 +18,6 @@ mod sidebar;
 mod helpers;
 mod infinite;
 mod listeners;
-mod relay;
 mod state;
 mod sticks;
 mod tick;
@@ -53,16 +52,6 @@ impl Plugin for MinesweeperPlugin {
 
         context.register_event_handler(listeners::JoinListener, EventPriority::Normal, false)?;
         context.register_event_handler(listeners::LeaveListener, EventPriority::Normal, true)?;
-        context.register_event_handler(
-            relay::ChatRelayListener,
-            EventPriority::Normal,
-            false,
-        )?;
-        context.register_event_handler(
-            relay::ChatSuppressListener,
-            EventPriority::Low,
-            true,
-        )?;
         context.register_event_handler(listeners::BreakListener, EventPriority::Normal, true)?;
         context.register_event_handler(
             listeners::InteractListener,
