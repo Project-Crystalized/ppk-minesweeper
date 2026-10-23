@@ -137,9 +137,12 @@ fn board_world(server: &Server) -> Option<World> {
         return Some(world);
     }
     if let Some(world) = server.get_all_worlds().into_iter().next() {
-        tracing::info!(
-            "leaderboard: no world named '{BOARD_WORLD_NAME}', using '{}' instead",
-            world.get_id()
+        warn_once(
+            "world-fallback",
+            &format!(
+                "leaderboard: no world named '{BOARD_WORLD_NAME}', using '{}' instead",
+                world.get_id()
+            ),
         );
         return Some(world);
     }
@@ -150,40 +153,23 @@ fn board_world(server: &Server) -> Option<World> {
 /// Rendered text block for one board: gold header + top 10 lines,
 /// newline-separated into a single display. Placeholder lines fill the
 /// empty tail so the board keeps its size before anyone plays.
-/// TEMP: render fake entries instead of DB rows so the boards can be
-/// visually checked (facing, brightness, layout) without polluting real
-/// stats. Flip to false before shipping.
-const DEMO_DATA: bool = true;
-
 fn board_text(board: &Board) -> String {
     let mut lines = vec![format!("§6§l{}", board.title)];
-    if DEMO_DATA {
-        const NAMES: [&str; 10] = [
-            "Notch", "Herobrine", "Steve", "Alex", "Creeper", "Enderman", "Zombie", "Skeleton",
-            "Villager", "Piglin",
-        ];
-        for (i, name) in NAMES.iter().enumerate() {
-            let value = match board.kind {
-                BoardKind::FastestWins => format!("{}s", 321 - i * 27),
-                BoardKind::MostGames => format!("{} games", 42 - i * 3),
-            };
-            lines.push(format!("§f{}. {} - {}", i + 1, name, value));
-        }
-    } else {
-        match board.kind {
-            BoardKind::FastestWins => {
-                for (i, w) in
-                    crate::db::top_spec_wins(board.mode, board.dim, 10).iter().enumerate()
-                {
-                    lines.push(format!("§f{}. {} - {}s", i + 1, w.owner_name, w.secs));
-                }
+    match board.kind {
+        BoardKind::FastestWins => {
+            for (i, w) in crate::db::top_spec_wins(board.mode, board.dim, 10)
+                .iter()
+                .enumerate()
+            {
+                lines.push(format!("§f{}. {} - {}s", i + 1, w.owner_name, w.secs));
             }
-            BoardKind::MostGames => {
-                for (i, w) in
-                    crate::db::top_spec_games(board.mode, board.dim, 10).iter().enumerate()
-                {
-                    lines.push(format!("§f{}. {} - {} games", i + 1, w.owner_name, w.games));
-                }
+        }
+        BoardKind::MostGames => {
+            for (i, w) in crate::db::top_spec_games(board.mode, board.dim, 10)
+                .iter()
+                .enumerate()
+            {
+                lines.push(format!("§f{}. {} - {} games", i + 1, w.owner_name, w.games));
             }
         }
     }
@@ -261,16 +247,6 @@ fn board_tags() -> Vec<&'static str> {
 fn refresh_board(world: &World, board: &Board) {
     let pos = (board.x, board.y, board.z);
     let text = board_text(board);
-    // Buried-check: a display inside solid blocks renders as nothing.
-    {
-        let at = pumpkin_plugin_api::common::BlockPos {
-            x: board.x as i32,
-            y: board.y as i32,
-            z: board.z as i32,
-        };
-        let block = crate::helpers::block_name(world, at);
-        tracing::info!("leaderboard: {} sits in {:?}", board.tag, block);
-    }
     let forced_fresh = fresh_cycle()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -278,13 +254,8 @@ fn refresh_board(world: &World, board: &Board) {
     if forced_fresh {
         // Boot: wipe every text display near the spot (leftovers, legacy
         // boards, stacks — tags may not survive restarts) and spawn fresh.
-        let removed = wipe_area(world, pos, &[]);
+        wipe_area(world, pos, &[]);
         spawn_board_display(world, board, pos, &text);
-        tracing::info!(
-            "leaderboard: {} fresh spawn (wiped {} leftover display(s))",
-            board.tag,
-            removed
-        );
         return;
     }
     // Live refresh: tag-only matching — spawns always carry the tag, so
@@ -293,15 +264,7 @@ fn refresh_board(world: &World, board: &Board) {
     // saves, so they're invisible until their chunk streams in) get removed
     // here, while every tagged keeper — ours and the other boards' — is
     // protected by name.
-    let keep = board_tags();
-    let wiped = wipe_area(world, pos, &keep);
-    if wiped > 0 {
-        tracing::info!(
-            "leaderboard: {} stray wipe removed {} display(s)",
-            board.tag,
-            wiped
-        );
-    }
+    wipe_area(world, pos, &board_tags());
     let mut keeper = None;
     for entity in world.get_entities() {
         if entity.get_custom_name().map(|c| c.get_text()).as_deref() == Some(board.tag) {

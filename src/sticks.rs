@@ -99,11 +99,6 @@ pub fn make_flag_item(flag_block: &str) -> ItemStack {
 pub fn held_starter(player: &Player) -> Option<NewGameSpec> {
     for hand in [Hand::Right, Hand::Left] {
         if let Some(stack) = player.get_item_in_hand(hand) {
-            tracing::info!(
-                "stick-check: hand={hand:?} key={} custom={:?}",
-                stack.get_registry_key(),
-                stack.get_custom_name().map(|c| c.get_text()),
-            );
             if let Some(spec) = starter_for(&stack) {
                 return Some(spec);
             }
@@ -193,7 +188,6 @@ pub fn give_fresh_kit(player: &Player) -> usize {
         player.set_inventory_item(slot, Some(stack));
         given += 1;
     }
-    tracing::info!("stick-kit: fresh kit for {}", player.get_name());
     given
 }
 
@@ -208,9 +202,6 @@ pub fn dedupe_kit(player: &Player) -> usize {
     removed += dedupe_named(player, FLAG_SWITCH_NAME, None);
     // Lock toggle: two display names, one identity.
     removed += dedupe_named(player, LOCKED_NAME, Some(UNLOCKED_NAME));
-    if removed > 0 {
-        tracing::info!("stick-kit: removed {removed} duplicate(s) for {}", player.get_name());
-    }
     removed
 }
 
@@ -296,10 +287,7 @@ pub fn give_kit(player: &Player) -> usize {
             continue;
         }
         if place_grid(player, slot, stack) {
-            tracing::info!("stick-kit: gave {name} to {}", player.get_name());
             given += 1;
-        } else {
-            tracing::info!("stick-kit: grid full, skipped {name}");
         }
     }
     given

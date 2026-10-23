@@ -67,16 +67,6 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
         };
         let world = player.get_world();
         let pos = to_pos3(event.block_pos);
-        // Look diagnostics (debug level): server-side yaw/pitch at click time.
-        tracing::debug!(
-            "look: {} yaw={:.1} pitch={:.1} clicking {}, {}, {}",
-            player.get_name(),
-            player.get_yaw(),
-            player.get_pitch(),
-            pos.x,
-            pos.y,
-            pos.z
-        );
 
         if let Some((id, idx)) = games::route(pos) {
             // Board clicks never break the underlying block, even when the
@@ -151,21 +141,10 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
             return event;
         }
         let Some(clicked) = event.clicked_pos else {
-            tracing::debug!(
-                "interact: RightClickBlock with no position (block={})",
-                event.block
-            );
             return event;
         };
         let world = event.player.get_world();
         let pos = to_pos3(clicked);
-        tracing::debug!(
-            "interact: click at {}, {}, {} (block={})",
-            pos.x,
-            pos.y,
-            pos.z,
-            event.block
-        );
 
         if let Some((id, idx)) = games::route(pos) {
             games::click_right(&world, &event.player, id, idx);

@@ -178,17 +178,10 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
     let mut rng = TinyRng::new(state::next_rng_seed(owner));
     let (kind, dim, board) = cells_of(spec, origin, &mut rng);
 
-    let build_start = std::time::Instant::now();
     let mut bulk = helpers::BulkWriter::new(&world);
     for cell in &board {
         bulk.set(cell.pos, COVERED_BLOCK);
     }
-    tracing::info!(
-        "build: {} {} cells in {:.1}ms",
-        spec.label(),
-        board.len(),
-        build_start.elapsed().as_secs_f64() * 1000.0
-    );
 
     let id = state::insert_game(GameInstance {
         kind,
@@ -241,20 +234,13 @@ pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) 
     tell(player, &format!("Cleared {n} game(s)."));
 }
 
-/// Write AIR over a game's cells. Bulk (chunk-level) + timing-logged; shared
-/// by punch-clear, `/ms clear` and the leave-event cleanup.
+/// Write AIR over a game's cells. Bulk (chunk-level); shared by punch-clear,
+/// `/ms clear` and the leave-event cleanup.
 pub fn clear_blocks(world: &World, game: &GameInstance) {
-    let start = std::time::Instant::now();
-    let cells = game.board.len();
     let mut bulk = helpers::BulkWriter::new(world);
     for cell in &game.board {
         bulk.set(cell.pos, AIR_BLOCK);
     }
-    tracing::info!(
-        "clear-writes: {} cells in {:.1}ms",
-        cells,
-        start.elapsed().as_secs_f64() * 1000.0
-    );
 }
 
 pub fn clear_game_in_world(world: &World, id: u32) {
@@ -264,10 +250,6 @@ pub fn clear_game_in_world(world: &World, id: u32) {
 }
 
 fn reveal_all(world: &World, game: &GameInstance) {
-    // Timing diagnostic: the loss reveal is our largest single write burst
-    // (dim² / dim³ tiles in one click) and had no instrumentation before.
-    let start = std::time::Instant::now();
-    let cells = game.board.len();
     let mut bulk = helpers::BulkWriter::new(world);
     for cell in &game.board {
         // Digit tiles need their `facing` block state; resolve the variant
@@ -284,11 +266,6 @@ fn reveal_all(world: &World, game: &GameInstance) {
             }
         }
     }
-    tracing::info!(
-        "reveal: {} cells in {:.1}ms",
-        cells,
-        start.elapsed().as_secs_f64() * 1000.0
-    );
 }
 
 fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
@@ -417,12 +394,7 @@ pub fn click_left(
     // Owner clicking after game over despawns the game.
     let over_owned = state::with_game(id, |g| g.is_over && g.owner == owner).unwrap_or(false);
     if over_owned {
-        let start = std::time::Instant::now();
         clear_game_in_world(world, id);
-        tracing::info!(
-            "clear: game #{id} removal handled in {:.1}ms",
-            start.elapsed().as_secs_f64() * 1000.0
-        );
         tell(player, "Game cleared. Start a new one with /ms.");
         return true;
     }

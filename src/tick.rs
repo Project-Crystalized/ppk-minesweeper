@@ -45,18 +45,6 @@ fn tick(server: Server) {
     let games = state::all_games_detailed();
     for player in players {
         let key = uuid_key(&player);
-        // Tripwire for the first-click pitch snap: log if anyone's view is
-        // ever near-vertical server-side.
-        let pitch = player.get_pitch();
-        if pitch.abs() > 80.0 {
-            tracing::info!(
-                "look-tripwire: {} yaw={:.1} pitch={:.1}",
-                player.get_name(),
-                player.get_yaw(),
-                pitch
-            );
-        }
-
         let world = player.get_world();
         let infinite = crate::infinite::is_infinite_world(&world);
         // Show the nearest board (any owner), like the old server's

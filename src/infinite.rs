@@ -97,7 +97,6 @@ pub fn ensure_world(server: &Server) -> World {
     };
     crate::helpers::apply_peaceful_rules(&world);
     let id = world.get_id();
-    tracing::info!("infinite: world id={id} generator={:?}", generator_id());
     let _ = infinite_id_slot().set(id);
     if let Some(gen_id) = generator_id() {
         world.set_chunk_generator(gen_id);
@@ -158,10 +157,6 @@ pub fn handle_break(
     y: i32,
     z: i32,
 ) -> bool {
-    tracing::info!(
-        "infinite: break at {x}, {y}, {z} (board_y={BOARD_Y}, world={})",
-        world.get_id()
-    );
     if y != BOARD_Y {
         return false;
     }
@@ -279,21 +274,11 @@ pub fn hydrate_session(player: &Player) {
             s.total_opened = row.opened;
             s.total_bombs = row.bombs;
         });
-        tracing::info!(
-            "infinite: hydrated {} (best {}, opened {})",
-            player.get_name(),
-            row.top,
-            row.opened,
-        );
     }
 }
 
 /// Right-click flag toggle in the infinite world. Returns true if intercepted.
 pub fn handle_interact(world: &World, player: &Player, x: i32, y: i32, z: i32) -> bool {
-    tracing::info!(
-        "infinite: interact at {x}, {y}, {z} (board_y={BOARD_Y}, world={})",
-        world.get_id()
-    );
     if y != BOARD_Y {
         return false;
     }

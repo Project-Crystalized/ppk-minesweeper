@@ -7,7 +7,6 @@ use pumpkin_plugin_api::{
     wit::pumpkin::plugin::command::Number,
     Server,
 };
-use tracing::info;
 
 use crate::{games::NewGameSpec, helpers::uuid_key, state::GameKind};
 
@@ -31,7 +30,6 @@ impl CommandHandler for HelpCommand {
         _server: Server,
         _args: ConsumedArgs,
     ) -> Result<i32, CommandError> {
-        info!("/ms help from {}", sender.get_name());
         sender.send_message(help_text());
         Ok(1)
     }
@@ -46,7 +44,6 @@ impl CommandHandler for RootCommand {
         _server: Server,
         _args: ConsumedArgs,
     ) -> Result<i32, CommandError> {
-        info!("/ms from {}", sender.get_name());
         sender.send_message(help_text());
         Ok(1)
     }
@@ -67,13 +64,8 @@ fn start_sized(sender: &CommandSender, kind: GameKind, args: &ConsumedArgs) -> R
         sender.send_error(TextComponent::text("Only players can start games."));
         return Ok(0);
     };
-    let label = match kind {
-        GameKind::TwoD => "2D",
-        GameKind::ThreeD => "3D",
-    };
     match parse_size(args).and_then(|n| usize::try_from(n).ok()).and_then(|n| NewGameSpec::custom(kind, n)) {
         Some(spec) => {
-            info!("/ms {} dim={} from {}", label, spec.dim, sender.get_name());
             crate::games::create_game(&player, spec);
             Ok(1)
         }
@@ -154,7 +146,6 @@ impl CommandHandler for InfiniteCommand {
         server: Server,
         _args: ConsumedArgs,
     ) -> Result<i32, CommandError> {
-        info!("/ms infinite from {}", sender.get_name());
         let Some(player) = player_of(&sender) else {
             sender.send_error(TextComponent::text("Only players can teleport."));
             return Ok(0);
