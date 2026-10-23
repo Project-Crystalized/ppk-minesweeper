@@ -25,6 +25,11 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
         // armor/offhand slots), then lay out the kit in the main inventory
         // grid. Drag a starter to your hotbar and right-click to play.
         crate::sticks::give_fresh_kit(&event.player);
+        crate::state::mark_join(crate::helpers::uuid_key(&event.player));
+        crate::db::touch_player(
+            crate::helpers::uuid_key(&event.player),
+            &event.player.get_name(),
+        );
         crate::infinite::hydrate_session(&event.player);
         tell(
             &event.player,
@@ -44,6 +49,12 @@ impl EventHandler<PlayerLeaveEvent> for LeaveListener {
     ) -> EventData<PlayerLeaveEvent> {
         let owner = uuid_key(&event.player);
         crate::sidebar::clear(&event.player);
+        // Record unfinished games as abandoned, then drop them.
+        for id in state::player_games(owner) {
+            games::record_abandoned(id, &event.player);
+        }
+        crate::db::add_playtime(owner, state::take_playtime_ticks(owner));
+        infinite::persist_session_for(owner, &event.player);
         for game in state::remove_player_games(owner) {
             // Best effort: clear blocks in the game's world if still loaded.
             if let Some(world) = server.get_world_by_name(&game.world_id) {
@@ -71,7 +82,7 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
         if let Some((id, idx)) = games::route(pos) {
             // Board clicks never break the underlying block, even when the
             // click itself is a no-op (flagged/open/locked/finished board).
-            games::click_left(&world, &server, player, id, idx);
+            games::click_left(&world, player, id, idx);
             event.cancelled = true;
             event.should_drop = false;
             event.exp = 0;

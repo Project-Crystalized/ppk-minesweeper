@@ -43,6 +43,14 @@ pub struct GameInstance {
     pub recorded: bool,
     pub world_id: String,
     pub comp_time_ticks: u64,
+    /// Seed that produced the current board (updated on first-click reshuffle).
+    pub seed: u64,
+    /// First-click regenerations applied to this board.
+    pub reshuffles: u32,
+    /// Left-clicks routed to this board (including swallowed ones).
+    pub clicks: u32,
+    /// Times a flag was toggled on (unflags do not count).
+    pub flags_placed: u32,
     pub is_over: bool,
     pub is_won: bool,
 }
@@ -62,6 +70,21 @@ impl GameInstance {
             .iter()
             .filter(|c| c.state == CellState::Flagged)
             .count()
+    }
+
+    /// Cells opened at the end of the game (loss reveal only rewrites blocks,
+    /// it does not change cell states, so this stays accurate).
+    pub fn opened_count(&self) -> usize {
+        use crate::core::CellState;
+        self.board
+            .iter()
+            .filter(|c| c.state == CellState::Opened)
+            .count()
+    }
+
+    /// Top-left/first cell position, used as the recorded board origin.
+    pub fn origin(&self) -> Pos3 {
+        self.board.first().map(|c| c.pos).unwrap_or_default()
     }
 
     /// Index of the cell at `pos`, if this game owns it.
@@ -115,6 +138,30 @@ pub fn now_tick() -> u64 {
 
 pub fn tick_advance() -> u64 {
     TICK.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+fn join_ticks() -> &'static Mutex<HashMap<UuidKey, u64>> {
+    static JOINS: OnceLock<Mutex<HashMap<UuidKey, u64>>> = OnceLock::new();
+    JOINS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Remember when a player joined so their playtime can be added on leave.
+pub fn mark_join(owner: UuidKey) {
+    join_ticks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(owner, now_tick());
+}
+
+/// Ticks spent online since `mark_join`, consumed on leave.
+pub fn take_playtime_ticks(owner: UuidKey) -> u64 {
+    let start = join_ticks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&owner);
+    start
+        .map(|start| now_tick().saturating_sub(start))
+        .unwrap_or(0)
 }
 
 /// Ticks a flag toggle stays locked (anti spam-hold). The old Valence game
@@ -210,7 +257,6 @@ pub fn player_game_count(owner: UuidKey) -> usize {
     lock().games.values().filter(|g| g.owner == owner).count()
 }
 
-#[allow(dead_code)]
 pub fn player_games(owner: UuidKey) -> Vec<u32> {
     lock()
         .games
@@ -387,7 +433,8 @@ pub fn flag_style_name(owner: UuidKey) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Infinite-mode sessions (in-memory only, per the no-persistence decision)
+// Infinite-mode sessions (live state in memory; lifetime totals persist in
+// `MsInfiniteStats`, see `db.rs`)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Default)]
@@ -395,7 +442,10 @@ pub struct InfiniteSession {
     pub current_streak: usize,
     pub top_streak: usize,
     pub total_opened: usize,
-    pub total_bombs: usize,
+    /// Bomb clicks (they reset the streak; they are not deaths).
+    pub bombs_clicked: usize,
+    /// Lifetime time spent in the infinite world, in ticks.
+    pub playtime_ticks: u64,
 }
 
 fn sessions() -> &'static Mutex<HashMap<UuidKey, InfiniteSession>> {
@@ -414,9 +464,7 @@ pub fn session(owner: UuidKey) -> Option<InfiniteSession> {
         .unwrap_or_else(|e| e.into_inner())
         .get(&owner)
         .copied()
-}
-
-/// Shared infinite board state: cells that are no longer `Closed`.
+}/// Shared infinite board state: cells that are no longer `Closed`.
 /// Content itself is derived deterministically from coordinates + seed.
 #[derive(Default)]
 pub struct InfiniteBoard {
@@ -461,6 +509,10 @@ mod tests {
             recorded: false,
             world_id: "test_world".to_string(),
             comp_time_ticks: 0,
+            seed: 1,
+            reshuffles: 0,
+            clicks: 0,
+            flags_placed: 0,
             is_over: false,
             is_won: false,
         }
@@ -547,7 +599,10 @@ mod tests {
     fn infinite_session_and_board_start_empty() {
         let owner = (0xAAA1_0005, 0xBBB1_0005);
         with_session_mut(owner, |s| {
-            assert_eq!((s.current_streak, s.top_streak, s.total_opened, s.total_bombs), (0, 0, 0, 0));
+            assert_eq!(
+                (s.current_streak, s.top_streak, s.total_opened, s.bombs_clicked, s.playtime_ticks),
+                (0, 0, 0, 0, 0)
+            );
         });
         with_infinite_board_mut("test_board_empty", |b| {
             assert!(b.cells.is_empty());

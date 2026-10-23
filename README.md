@@ -16,28 +16,47 @@ inside Pumpkin instead of as its own server.
 | `/ms clear` | Remove all your games (blocks cleared in their own worlds) |
 | `/ms list` | List your games (kind, dim, locks, helpers) |
 | `/ms kit` | Re-give starter sticks + lock/flag items |
-| `/ms stats` | Your box record per size (games, wins, best) + infinite totals |
+| `/ms stats` | Per-size record (games, wins, best/avg) + co-op + infinite totals |
 | `/ms top` | Fastest wins + best infinite streaks (from SQLite) |
 | `/ms infinite` | Teleport to the endless `ms_infinite` world |
 
 Left-click opens a cell, right-click toggles a flag with your own color.
 Flagged/open cells ignore left-clicks (flagged bombs can't explode).
 Locked games only respond to their owner; clicking your own
-finished board clears it. Max 3 box games per player. A per-second action bar
+finished board clears it. Max 3 active games per player. A per-second action bar
 shows the nearest board with time / bombs / flags. Infinite mode tracks
 streaks with color tiers and 500/1000 broadcasts.
 
 ## Persistence (SQLite)
 
-Finished box games (win or loss) and infinite-mode sessions are recorded in
-a single SQLite file, following the `LsDatabase` conventions (one file,
-`CREATE TABLE IF NOT EXISTS` + additive migrations, fail-soft: a broken DB
-disables recording, the game keeps running):
+Finished sized games (win, loss or abandoned) and infinite-mode lifetime totals
+are recorded in a single SQLite file, following the `LsDatabase` conventions
+(one file, `CREATE TABLE IF NOT EXISTS`, fail-soft: a broken DB disables
+recording, the game keeps running):
 
-- `MsBoxGames` / `MsBoxPlayers`: every finished game (dim, mode, time, won,
-  owner + helpers, timestamp) — mirrors the old `insert_minesweeper`.
-- `MsInfiniteStats`: per-player best streak + totals (upsert, write-through
-  per click) — mirrors the old infinite stats. Totals are restored on join.
+- `MsPlayers`: identity row per player (UUID, current name, a short name
+  history, first/last seen, lifetime online playtime in ticks). Names on
+  leaderboards are resolved from here, so renames show up immediately.
+- `MsGames`: one row per finished or abandoned game: `kind` (0 = 2D,
+  1 = 3D), `dim`, final board `seed`, `time_ticks`, `outcome`
+  (0 = loss, 1 = win, 2 = abandoned), bombs, flags, flags placed, cells
+  opened, left-clicks, first-click reshuffles, helper count, locked flag,
+  epoch end time and board origin `x/y/z`. The world a game was played in is
+  deliberately not stored.
+- `MsGamePlayers`: game roster (`is_owner` 1/0), which powers co-op credit.
+- `MsInfiniteStats`: lifetime infinite totals per player (best streak, cells
+  opened, bombs clicked, playtime, last played). Only totals persist; the
+  live streak restarts at 0 after every login.
+- `MsDaily`: small per-day rollup (`games`, `wins`, `abandoned`, `opened`,
+  `flags`, `time_ticks`), reserved for a future stats page.
+- Indexes: a partial fastest-win index per `(kind, dim)` restricted to wins,
+  a per-spec games index, a per-owner `(owner_id, kind, dim)` index and a
+  roster lookup on `MsGamePlayers(player_id)`.
+
+There is intentionally no migration/backfill code. Schema changes require
+deleting `data/minesweeper.sql` before deploying (the plugin recreates it).
+With one finished game per minute, the log grows by roughly 40–45 MB per year
+including its indexes.
 
 The WASM sandbox only exposes the plugin's own data folder (the manifest
 requests `fs.write.data`), so the file lives at
@@ -58,7 +77,9 @@ wins below it in a single text display entity (tags `ms_lb_2d50`,
 `ms_lb_3d7`). Lines are
 tagged (`ms_lb_2d50_00`…), so refresh updates them in place and restarts
 heal without ghosts. Coordinates live in `src/leaderboard.rs` (`BOARDS`).
-`/ms top` shows the same data in chat.
+Two of the four boards rank most games finished for a spec; abandoned boards
+are stored in `MsGames` but do not count there. `/ms top` shows the fastest
+wins and best infinite streaks in chat.
 
 ## Build
 

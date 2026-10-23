@@ -222,7 +222,7 @@ pub fn handle_break(
             play_sound(world, Pos3::new(x, y, z), Sound::EntityGenericExplode);
             state::with_session_mut(key, |s| {
                 s.current_streak = 0;
-                s.total_bombs += 1;
+                s.bombs_clicked += 1;
             });
             persist_session(key, player);
             tell(player, "You clicked a bomb, streak reset!");
@@ -254,14 +254,28 @@ pub fn handle_break(
     }
 }
 
-/// Write-through session snapshot (one row per player). Fail-soft. Only the
-/// durable numbers go out (best/total); the live streak restarts at 0 after
-/// every login (see hydrate_session).
+/// Write-through lifetime totals (one row per player). Fail-soft. Only the
+/// durable numbers go out (best/opened/bombs/playtime); the live streak
+/// restarts at 0 after every login (see hydrate_session).
 fn persist_session(key: crate::state::UuidKey, player: &Player) {
-    let (top, opened, bombs) = state::with_session_mut(key, |s| {
-        (s.top_streak, s.total_opened, s.total_bombs)
+    let (top, opened, bombs, playtime) = state::with_session_mut(key, |s| {
+        (
+            s.top_streak,
+            s.total_opened,
+            s.bombs_clicked,
+            s.playtime_ticks,
+        )
     });
-    crate::db::save_infinite(key, &player.get_name(), top, opened, bombs);
+    crate::db::save_infinite(key, Some(&player.get_name()), top, opened, bombs, playtime);
+}
+
+/// Persist a player's lifetime infinite totals (leave + periodic flush).
+/// Players who never entered the infinite world have no session and are not
+/// given a zero row.
+pub fn persist_session_for(key: crate::state::UuidKey, player: &Player) {
+    if state::session(key).is_some() {
+        persist_session(key, player);
+    }
 }
 
 /// Restore durable totals after a restart; the live streak always starts at 0.
@@ -272,7 +286,8 @@ pub fn hydrate_session(player: &Player) {
             s.current_streak = 0;
             s.top_streak = row.top;
             s.total_opened = row.opened;
-            s.total_bombs = row.bombs;
+            s.bombs_clicked = row.bombs_clicked;
+            s.playtime_ticks = row.playtime;
         });
     }
 }

@@ -181,7 +181,7 @@ fn infinite_lines(player: &Player) -> Vec<String> {
             "§7Best: §f{} §8| §7Opened: §f{}",
             s.top_streak, s.total_opened
         ),
-        format!("§cBombs hit: §f{}", s.total_bombs),
+        format!("§cBombs hit: §f{}", s.bombs_clicked),
     ]
 }
 

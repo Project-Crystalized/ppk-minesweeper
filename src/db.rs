@@ -1,7 +1,12 @@
-//! SQLite persistence, mirroring the house `LsDatabase` conventions:
-//! a single SQLite file, `CREATE TABLE IF NOT EXISTS` on startup, additive
-//! column migrations, one connection per operation, and fail-soft behavior
-//! (a broken DB disables recording; the game keeps running).
+//! SQLite persistence, following the house `LsDatabase` conventions:
+//! a single SQLite file, `CREATE TABLE IF NOT EXISTS` on startup, one
+//! connection per operation, and fail-soft behavior (a broken DB disables
+//! recording; the game keeps running).
+//!
+//! Schema v2 (see `setup_in`): `MsPlayers` identities, `MsGames` per-game
+//! event log, `MsGamePlayers` rosters, lifetime `MsInfiniteStats` totals and
+//! a small per-day `MsDaily` rollup. There is deliberately no migration code:
+//! the file is reset whenever the schema changes.
 //!
 //! Sandbox note: the Pumpkin host only preopens the plugin's own data folder
 //! (needs the `fs.write.data` manifest permission), so the file lives at
@@ -20,6 +25,15 @@ use crate::state::UuidKey;
 
 /// Guest-side path: resolved against the preopened `data` dir by the host.
 pub const DB_PATH: &str = "data/minesweeper.sql";
+
+/// `MsGames.kind` values (tiny integers, no mode strings).
+pub const KIND_2D: i64 = 0;
+pub const KIND_3D: i64 = 1;
+
+/// `MsGames.outcome` values.
+pub const OUTCOME_LOSS: i64 = 0;
+pub const OUTCOME_WIN: i64 = 1;
+pub const OUTCOME_ABANDONED: i64 = 2;
 
 /// Fail-soft latch: once setup (or the directory) proves broken, every op
 /// becomes a no-op instead of logging on every click.
@@ -88,50 +102,69 @@ pub fn uuid_from_bytes(b: &[u8]) -> Option<UuidKey> {
 }
 
 fn setup_in(conn: &Connection) -> rusqlite::Result<()> {
+    // Plain creation: the SQLite file is reset with every schema change
+    // (delete `data/minesweeper.sql` before deploying a new schema).
     conn.execute_batch(concat!(
-        "CREATE TABLE IF NOT EXISTS MsBoxGames(",
-        "game_id INTEGER PRIMARY KEY,",
-        "dim INTEGER, mode STRING, time_ticks INTEGER, won INTEGER,",
-        "timestamp INTEGER, owner_uuid BLOB, owner_name STRING, helper_count INTEGER);",
-        "CREATE TABLE IF NOT EXISTS MsBoxPlayers(",
-        "game INTEGER REFERENCES MsBoxGames(game_id),",
-        "player_uuid BLOB, is_owner INTEGER);",
-        "CREATE TABLE IF NOT EXISTS MsInfiniteStats(",
-        "player_uuid BLOB UNIQUE, player_name STRING,",
-        "top_streak INTEGER, total_opened INTEGER, total_bombs INTEGER);",
-    ))?;
-    // Additive migrations for DBs created by older plugin versions.
-    ensure_column(conn, "MsBoxGames", "owner_name", "owner_name STRING")?;
-    ensure_column(conn, "MsBoxGames", "helper_count", "helper_count INTEGER")?;
-    ensure_column(
-        conn,
-        "MsInfiniteStats",
-        "player_name",
-        "player_name STRING",
-    )?;
-    Ok(())
-}
+        "CREATE TABLE IF NOT EXISTS MsPlayers(",
+        "player_id INTEGER PRIMARY KEY,",
+        "uuid BLOB NOT NULL UNIQUE,",
+        "name TEXT NOT NULL,",
+        "name_history TEXT NOT NULL DEFAULT '',",
+        "first_seen INTEGER NOT NULL,",
+        "last_seen INTEGER NOT NULL,",
+        "playtime_ticks INTEGER NOT NULL DEFAULT 0);",
 
-/// Add `column` to `table` when the stored schema lacks it (same pattern
-/// as `LsDatabase.ensure_column`, but disambiguated via `sqlite_master` so
-/// a missing table isn't mistaken for a missing column).
-fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> rusqlite::Result<()> {
-    let ddl: Option<String> = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE name = ?;",
-            params![table],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(ddl) = ddl else {
-        return Ok(());
-    };
-    if ddl.contains(column) {
-        return Ok(());
-    }
-    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition};"))?;
-    tracing::info!("database: added missing column '{column}' to {table}.");
-    Ok(())
+        "CREATE TABLE IF NOT EXISTS MsGames(",
+        "game_id INTEGER PRIMARY KEY,",
+        "owner_id INTEGER NOT NULL REFERENCES MsPlayers(player_id),",
+        "kind INTEGER NOT NULL,",
+        "dim INTEGER NOT NULL,",
+        "seed INTEGER NOT NULL,",
+        "time_ticks INTEGER NOT NULL,",
+        "outcome INTEGER NOT NULL,",
+        "bombs INTEGER NOT NULL,",
+        "flags INTEGER NOT NULL,",
+        "flags_placed INTEGER NOT NULL,",
+        "opened INTEGER NOT NULL,",
+        "clicks INTEGER NOT NULL,",
+        "reshuffles INTEGER NOT NULL,",
+        "helpers INTEGER NOT NULL,",
+        "locked INTEGER NOT NULL,",
+        "ended INTEGER NOT NULL,",
+        "x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL);",
+
+        "CREATE INDEX IF NOT EXISTS MsGames_wins ",
+        "ON MsGames(kind, dim, time_ticks) WHERE outcome = 1;",
+        "CREATE INDEX IF NOT EXISTS MsGames_games ",
+        "ON MsGames(kind, dim, owner_id);",
+        "CREATE INDEX IF NOT EXISTS MsGames_owner ",
+        "ON MsGames(owner_id, kind, dim);",
+
+        "CREATE TABLE IF NOT EXISTS MsGamePlayers(",
+        "game_id INTEGER NOT NULL REFERENCES MsGames(game_id) ON DELETE CASCADE,",
+        "player_id INTEGER NOT NULL REFERENCES MsPlayers(player_id),",
+        "is_owner INTEGER NOT NULL,",
+        "PRIMARY KEY(game_id, player_id));",
+        "CREATE INDEX IF NOT EXISTS MsGamePlayers_player ",
+        "ON MsGamePlayers(player_id);",
+
+        "CREATE TABLE IF NOT EXISTS MsInfiniteStats(",
+        "player_id INTEGER PRIMARY KEY REFERENCES MsPlayers(player_id),",
+        "top_streak INTEGER NOT NULL,",
+        "total_opened INTEGER NOT NULL,",
+        "bombs_clicked INTEGER NOT NULL,",
+        "playtime_ticks INTEGER NOT NULL DEFAULT 0,",
+        "last_played INTEGER NOT NULL);",
+
+        "CREATE TABLE IF NOT EXISTS MsDaily(",
+        "day INTEGER PRIMARY KEY,",
+        "games INTEGER NOT NULL,",
+        "wins INTEGER NOT NULL,",
+        "abandoned INTEGER NOT NULL,",
+        "opened INTEGER NOT NULL,",
+        "flags INTEGER NOT NULL,",
+        "time_ticks INTEGER NOT NULL);",
+    ))
 }
 
 /// Create tables on startup. Fail-soft: the game runs without recording.
@@ -145,114 +178,276 @@ pub fn setup() {
     }
 }
 
-fn record_box_game_in(
-    conn: &Connection,
-    dim: usize,
-    mode: &str,
-    time_ticks: u64,
-    won: bool,
-    owner: UuidKey,
-    owner_name: &str,
-    helpers: &[UuidKey],
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO MsBoxGames(dim, mode, time_ticks, won, timestamp, owner_uuid, owner_name, helper_count) \
-         VALUES(?, ?, ?, ?, unixepoch(), ?, ?, ?);",
-        params![
-            dim as i64,
-            mode,
-            time_ticks as i64,
-            won as i64,
-            uuid_bytes(owner).to_vec(),
-            owner_name,
-            helpers.len() as i64,
-        ],
-    )?;
-    let game_id = conn.last_insert_rowid();
-    {
-        let mut stmt = conn.prepare(
-            "INSERT INTO MsBoxPlayers(game, player_uuid, is_owner) VALUES(?, ?, ?);",
-        )?;
-        stmt.execute(params![game_id, uuid_bytes(owner).to_vec(), 1])?;
-        for h in helpers {
-            stmt.execute(params![game_id, uuid_bytes(*h).to_vec(), 0])?;
-        }
+/// Keep the last few distinct old names, comma separated.
+fn push_name(history: &str, old: &str) -> String {
+    let old = old.trim();
+    if old.is_empty() || old == "?" {
+        return history.to_string();
     }
-    Ok(())
+    let mut names: Vec<&str> = history.split(',').filter(|s| !s.is_empty()).collect();
+    if names.contains(&old) {
+        return history.to_string();
+    }
+    names.push(old);
+    if names.len() > 6 {
+        names.remove(0);
+    }
+    names.join(",")
 }
 
-/// Record a finished box game plus its roster. Returns success.
-pub fn record_box_game(
-    dim: usize,
-    mode: &str,
-    time_ticks: u64,
-    won: bool,
+/// Fetch or create a player row. `name` is only written when supplied (and
+/// different); helpers recorded offline are inserted as `"?"` and repaired
+/// when they next join.
+fn ensure_player_in(
+    conn: &Connection,
     owner: UuidKey,
-    owner_name: &str,
-    helpers: &[UuidKey],
-) -> bool {
-    let ok = with_conn(|c| {
-        record_box_game_in(c, dim, mode, time_ticks, won, owner, owner_name, helpers)
-    })
-    .is_some_and(|r| r.is_ok());
+    name: Option<&str>,
+) -> rusqlite::Result<i64> {
+    let bytes = uuid_bytes(owner).to_vec();
+    let existing: Option<(i64, String, String)> = conn
+        .query_row(
+            "SELECT player_id, name, name_history FROM MsPlayers WHERE uuid = ?;",
+            params![bytes],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    match existing {
+        Some((id, current, history)) => {
+            match name.filter(|n| !n.is_empty() && *n != "?") {
+                Some(name) if name != current => {
+                    let history = push_name(&history, &current);
+                    conn.execute(
+                        "UPDATE MsPlayers SET name = ?, name_history = ?, \
+                         last_seen = unixepoch() WHERE player_id = ?;",
+                        params![name, history, id],
+                    )?;
+                }
+                _ => {
+                    conn.execute(
+                        "UPDATE MsPlayers SET last_seen = unixepoch() \
+                         WHERE player_id = ?;",
+                        params![id],
+                    )?;
+                }
+            }
+            Ok(id)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO MsPlayers(uuid, name, name_history, first_seen, last_seen) \
+                 VALUES(?, ?, '', unixepoch(), unixepoch());",
+                params![bytes, name.unwrap_or("?")],
+            )?;
+            Ok(conn.last_insert_rowid())
+        }
+    }
+}
+
+/// Insert or refresh a player identity (called on join and at game end).
+pub fn touch_player(owner: UuidKey, name: &str) {
+    let _ = with_conn(|c| ensure_player_in(c, owner, Some(name)));
+}
+
+/// Accumulate lifetime online time (ticks, 20/s).
+pub fn add_playtime(owner: UuidKey, ticks: u64) {
+    if ticks == 0 {
+        return;
+    }
+    let _ = with_conn(|c| {
+        c.execute(
+            "UPDATE MsPlayers SET playtime_ticks = playtime_ticks + ? \
+             WHERE uuid = ?;",
+            params![ticks as i64, uuid_bytes(owner).to_vec()],
+        )
+    });
+}
+
+/// One finished or abandoned sized game.
+pub struct GameRecord<'a> {
+    pub owner: UuidKey,
+    /// Owner name when known (usually only when the owner is the finisher).
+    pub owner_name: Option<&'a str>,
+    pub helpers: &'a [UuidKey],
+    pub kind: i64,
+    pub dim: usize,
+    /// Final board seed; `u64` bitcast into SQLite's signed INTEGER.
+    pub seed: u64,
+    pub time_ticks: u64,
+    pub outcome: i64,
+    pub bombs: usize,
+    pub flags: usize,
+    pub flags_placed: u32,
+    pub opened: usize,
+    pub clicks: u32,
+    pub reshuffles: u32,
+    pub locked: bool,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+fn kind_label(kind: i64) -> &'static str {
+    if kind == KIND_3D { "3D" } else { "2D" }
+}
+
+fn outcome_label(outcome: i64) -> &'static str {
+    match outcome {
+        OUTCOME_WIN => "win",
+        OUTCOME_ABANDONED => "abandoned",
+        _ => "loss",
+    }
+}
+
+fn record_game_in(conn: &Connection, r: &GameRecord<'_>) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let owner_id = ensure_player_in(&tx, r.owner, r.owner_name)?;
+    let mut helper_ids = Vec::with_capacity(r.helpers.len());
+    for helper in r.helpers {
+        let id = ensure_player_in(&tx, *helper, None)?;
+        if id != owner_id && !helper_ids.contains(&id) {
+            helper_ids.push(id);
+        }
+    }
+    tx.execute(
+        "INSERT INTO MsGames(owner_id, kind, dim, seed, time_ticks, outcome, \
+         bombs, flags, flags_placed, opened, clicks, reshuffles, helpers, \
+         locked, ended, x, y, z) \
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), ?, ?, ?);",
+        params![
+            owner_id,
+            r.kind,
+            r.dim as i64,
+            r.seed as i64,
+            r.time_ticks as i64,
+            r.outcome,
+            r.bombs as i64,
+            r.flags as i64,
+            r.flags_placed as i64,
+            r.opened as i64,
+            r.clicks as i64,
+            r.reshuffles as i64,
+            helper_ids.len() as i64,
+            r.locked as i64,
+            r.x,
+            r.y,
+            r.z,
+        ],
+    )?;
+    let game_id = tx.last_insert_rowid();
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO MsGamePlayers(game_id, player_id, is_owner) \
+             VALUES(?, ?, ?);",
+        )?;
+        stmt.execute(params![game_id, owner_id, 1])?;
+        for id in &helper_ids {
+            stmt.execute(params![game_id, id, 0])?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO MsDaily(day, games, wins, abandoned, opened, flags, time_ticks) \
+         VALUES(unixepoch() / 86400, 1, ?, ?, ?, ?, ?) \
+         ON CONFLICT(day) DO UPDATE SET \
+           games = games + 1, \
+           wins = wins + excluded.wins, \
+           abandoned = abandoned + excluded.abandoned, \
+           opened = opened + excluded.opened, \
+           flags = flags + excluded.flags, \
+           time_ticks = time_ticks + excluded.time_ticks;",
+        params![
+            (r.outcome == OUTCOME_WIN) as i64,
+            (r.outcome == OUTCOME_ABANDONED) as i64,
+            r.opened as i64,
+            r.flags_placed as i64,
+            r.time_ticks as i64,
+        ],
+    )?;
+    tx.commit()
+}
+
+/// Record a finished/abandoned game plus its roster. Returns success.
+pub fn record_game(record: &GameRecord<'_>) -> bool {
+    let ok = with_conn(|c| record_game_in(c, record)).is_some_and(|r| r.is_ok());
     if ok {
         tracing::info!(
-            "database: recorded {mode} {dim} {} by {owner_name} ({} ticks, {} helpers)",
-            if won { "win" } else { "loss" },
-            time_ticks,
-            helpers.len(),
+            "database: recorded {} {} {} by {} ({} ticks, {} helpers)",
+            kind_label(record.kind),
+            record.dim,
+            outcome_label(record.outcome),
+            record.owner_name.unwrap_or("?"),
+            record.time_ticks,
+            record.helpers.len(),
         );
     } else {
-        tracing::warn!("database: failed to record box game; will retry on next click.");
+        tracing::warn!("database: failed to record game");
     }
     ok
+}
+
+/// `MsInfiniteStats` row: lifetime totals only (no session data).
+pub struct InfiniteRow {
+    pub top: usize,
+    pub opened: usize,
+    pub bombs_clicked: usize,
+    pub playtime: u64,
 }
 
 fn save_infinite_in(
     conn: &Connection,
     owner: UuidKey,
-    name: &str,
+    name: Option<&str>,
     top: usize,
     opened: usize,
-    bombs: usize,
+    bombs_clicked: usize,
+    playtime: u64,
 ) -> rusqlite::Result<()> {
+    let player_id = ensure_player_in(conn, owner, name)?;
     conn.execute(
-        "INSERT INTO MsInfiniteStats(player_uuid, player_name, top_streak, total_opened, total_bombs) \
-         VALUES(?, ?, ?, ?, ?) \
-         ON CONFLICT(player_uuid) DO UPDATE SET \
-           player_name = excluded.player_name, top_streak = excluded.top_streak, \
-           total_opened = excluded.total_opened, total_bombs = excluded.total_bombs;",
+        "INSERT INTO MsInfiniteStats(player_id, top_streak, total_opened, \
+         bombs_clicked, playtime_ticks, last_played) \
+         VALUES(?, ?, ?, ?, ?, unixepoch()) \
+         ON CONFLICT(player_id) DO UPDATE SET \
+           top_streak = excluded.top_streak, \
+           total_opened = excluded.total_opened, \
+           bombs_clicked = excluded.bombs_clicked, \
+           playtime_ticks = excluded.playtime_ticks, \
+           last_played = excluded.last_played;",
         params![
-            uuid_bytes(owner).to_vec(),
-            name,
+            player_id,
             top as i64,
             opened as i64,
-            bombs as i64,
+            bombs_clicked as i64,
+            playtime as i64,
         ],
     )?;
     Ok(())
 }
 
-/// Write-through infinite session snapshot. Cheap (one row) and fail-soft.
-pub fn save_infinite(owner: UuidKey, name: &str, top: usize, opened: usize, bombs: usize) -> bool {
-    with_conn(|c| save_infinite_in(c, owner, name, top, opened, bombs)).is_some_and(|r| r.is_ok())
-}
-
-pub struct InfiniteRow {
-    pub top: usize,
-    pub opened: usize,
-    pub bombs: usize,
+/// Write-through infinite total snapshot. Cheap (one row) and fail-soft.
+pub fn save_infinite(
+    owner: UuidKey,
+    name: Option<&str>,
+    top: usize,
+    opened: usize,
+    bombs_clicked: usize,
+    playtime: u64,
+) -> bool {
+    with_conn(|c| save_infinite_in(c, owner, name, top, opened, bombs_clicked, playtime))
+        .is_some_and(|r| r.is_ok())
 }
 
 pub fn load_infinite_in(conn: &Connection, owner: UuidKey) -> Option<InfiniteRow> {
     conn.query_row(
-        "SELECT top_streak, total_opened, total_bombs FROM MsInfiniteStats WHERE player_uuid = ?;",
+        "SELECT top_streak, total_opened, bombs_clicked, playtime_ticks \
+         FROM MsInfiniteStats \
+         WHERE player_id = (SELECT player_id FROM MsPlayers WHERE uuid = ?);",
         params![uuid_bytes(owner).to_vec()],
         |row| {
             Ok(InfiniteRow {
                 top: row.get::<_, i64>(0)? as usize,
                 opened: row.get::<_, i64>(1)? as usize,
-                bombs: row.get::<_, i64>(2)? as usize,
+                bombs_clicked: row.get::<_, i64>(2)? as usize,
+                playtime: row.get::<_, i64>(3)? as u64,
             })
         },
     )
@@ -265,104 +460,161 @@ pub fn load_infinite(owner: UuidKey) -> Option<InfiniteRow> {
     with_conn(|c| load_infinite_in(c, owner)).flatten()
 }
 
-pub struct BoxRecord {
-    pub mode: String,
+/// Aggregate record for one player and one exact board spec.
+pub struct SpecRecord {
+    pub kind: i64,
     pub dim: usize,
     pub games: usize,
     pub wins: usize,
+    /// Games dropped unfinished (`/ms clear`, leave).
+    pub abandoned: usize,
     pub best_secs: Option<u64>,
+    pub avg_secs: Option<u64>,
+    pub opened: u64,
+    pub flags: u64,
+    pub bombs: u64,
 }
 
-/// Full box record per (mode, dim): games played, wins, and fastest win.
-/// Losses are stored too, so they count toward `games` but never `best`.
-pub fn box_records_in(conn: &Connection, owner: UuidKey) -> Vec<BoxRecord> {
+/// Per-spec history: games (any outcome), wins, abandoned count, fastest win,
+/// average finished-game duration, and cumulative opened/flags/bombs.
+pub fn spec_records_in(conn: &Connection, owner: UuidKey) -> Vec<SpecRecord> {
     let mut stmt = match conn.prepare(
-        "SELECT mode, dim, COUNT(*), SUM(won), MIN(CASE WHEN won = 1 THEN time_ticks END) \
-         FROM MsBoxGames WHERE owner_uuid = ? GROUP BY mode, dim ORDER BY mode, dim;",
+        "SELECT kind, dim, COUNT(*), SUM(outcome = 1), SUM(outcome = 2), \
+           MIN(CASE WHEN outcome = 1 THEN time_ticks END), \
+           AVG(CASE WHEN outcome <> 2 THEN time_ticks END), \
+           COALESCE(SUM(opened), 0), COALESCE(SUM(flags_placed), 0), \
+           COALESCE(SUM(bombs), 0) \
+         FROM MsGames \
+         WHERE owner_id = (SELECT player_id FROM MsPlayers WHERE uuid = ?) \
+         GROUP BY kind, dim ORDER BY kind, dim;",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
     let rows = stmt.query_map(params![uuid_bytes(owner).to_vec()], |row| {
-        Ok(BoxRecord {
-            mode: row.get::<_, String>(0)?,
+        Ok(SpecRecord {
+            kind: row.get::<_, i64>(0)?,
             dim: row.get::<_, i64>(1)? as usize,
             games: row.get::<_, i64>(2)? as usize,
             wins: row.get::<_, i64>(3)? as usize,
+            abandoned: row.get::<_, i64>(4)? as usize,
             best_secs: row
-                .get::<_, Option<i64>>(4)?
+                .get::<_, Option<i64>>(5)?
                 .map(|t| t as u64 / 20),
+            avg_secs: row
+                .get::<_, Option<f64>>(6)?
+                .map(|t| (t / 20.0).round() as u64),
+            opened: row.get::<_, i64>(7)? as u64,
+            flags: row.get::<_, i64>(8)? as u64,
+            bombs: row.get::<_, i64>(9)? as u64,
         })
     });
     rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
 }
 
-pub fn box_records(owner: UuidKey) -> Vec<BoxRecord> {
-    with_conn(|c| box_records_in(c, owner)).unwrap_or_default()
+pub fn spec_records(owner: UuidKey) -> Vec<SpecRecord> {
+    with_conn(|c| spec_records_in(c, owner)).unwrap_or_default()
+}
+
+/// Games another player finished on your board (and how many were wins).
+pub struct HelperRecord {
+    pub games: usize,
+    pub wins: usize,
+}
+
+pub fn helper_record_in(conn: &Connection, owner: UuidKey) -> HelperRecord {
+    conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(g.outcome = 1), 0) \
+         FROM MsGamePlayers gp JOIN MsGames g ON g.game_id = gp.game_id \
+         WHERE gp.player_id = (SELECT player_id FROM MsPlayers WHERE uuid = ?) \
+           AND gp.is_owner = 0;",
+        params![uuid_bytes(owner).to_vec()],
+        |row| {
+            Ok(HelperRecord {
+                games: row.get::<_, i64>(0)? as usize,
+                wins: row.get::<_, i64>(1)? as usize,
+            })
+        },
+    )
+    .unwrap_or(HelperRecord { games: 0, wins: 0 })
+}
+
+pub fn helper_record(owner: UuidKey) -> HelperRecord {
+    with_conn(|c| helper_record_in(c, owner)).unwrap_or(HelperRecord { games: 0, wins: 0 })
 }
 
 pub struct TopWin {
     pub owner_name: String,
-    pub mode: String,
+    pub kind: i64,
     pub dim: usize,
     pub secs: u64,
 }
 
-/// Fastest wins overall, optionally filtered to one mode ("2D"/"3D").
-pub fn top_wins_in(conn: &Connection, mode: Option<&str>, limit: usize) -> Vec<TopWin> {
-    let sql = match mode {
+fn map_top_win(row: &rusqlite::Row<'_>) -> rusqlite::Result<TopWin> {
+    Ok(TopWin {
+        owner_name: row.get::<_, String>(0)?,
+        kind: row.get::<_, i64>(1)?,
+        dim: row.get::<_, i64>(2)? as usize,
+        secs: row.get::<_, i64>(3)? as u64 / 20,
+    })
+}
+
+/// Fastest wins overall, optionally filtered to one kind (`KIND_2D`/`KIND_3D`).
+pub fn top_wins_in(conn: &Connection, kind: Option<i64>, limit: usize) -> Vec<TopWin> {
+    let sql = match kind {
         Some(_) => {
-            "SELECT owner_name, mode, dim, MIN(time_ticks) FROM MsBoxGames \
-             WHERE won = 1 AND mode = ? GROUP BY owner_uuid, mode, dim \
-             ORDER BY MIN(time_ticks) ASC LIMIT ?;"
+            "SELECT p.name, g.kind, g.dim, MIN(g.time_ticks) \
+             FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
+             WHERE g.outcome = 1 AND g.kind = ? \
+             GROUP BY g.owner_id, g.kind, g.dim \
+             ORDER BY MIN(g.time_ticks) ASC LIMIT ?;"
         }
         None => {
-            "SELECT owner_name, mode, dim, MIN(time_ticks) FROM MsBoxGames \
-             WHERE won = 1 GROUP BY owner_uuid, mode, dim \
-             ORDER BY MIN(time_ticks) ASC LIMIT ?;"
+            "SELECT p.name, g.kind, g.dim, MIN(g.time_ticks) \
+             FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
+             WHERE g.outcome = 1 \
+             GROUP BY g.owner_id, g.kind, g.dim \
+             ORDER BY MIN(g.time_ticks) ASC LIMIT ?;"
         }
     };
     let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = match mode {
-        Some(m) => stmt.query_map(params![m, limit as i64], map_top_win),
+    let rows = match kind {
+        Some(k) => stmt.query_map(params![k, limit as i64], map_top_win),
         None => stmt.query_map(params![limit as i64], map_top_win),
     };
     rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
 }
 
-fn map_top_win(row: &rusqlite::Row<'_>) -> rusqlite::Result<TopWin> {
-    Ok(TopWin {
-        owner_name: row.get::<_, String>(0)?,
-        mode: row.get::<_, String>(1)?,
-        dim: row.get::<_, i64>(2)? as usize,
-        secs: row.get::<_, i64>(3)? as u64 / 20,
-    })
+pub fn top_wins(kind: Option<i64>, limit: usize) -> Vec<TopWin> {
+    with_conn(|c| top_wins_in(c, kind, limit)).unwrap_or_default()
 }
 
-pub fn top_wins(mode: Option<&str>, limit: usize) -> Vec<TopWin> {
-    with_conn(|c| top_wins_in(c, mode, limit)).unwrap_or_default()
-}
-
-/// Fastest wins for one exact board spec (mode + dim), all-time.
-/// Backs the in-world leaderboard displays.
-pub fn top_spec_wins_in(conn: &Connection, mode: &str, dim: usize, limit: usize) -> Vec<TopWin> {
+/// Fastest wins for one exact board spec, all-time. Backs the in-world
+/// leaderboard displays.
+pub fn top_spec_wins_in(
+    conn: &Connection,
+    kind: i64,
+    dim: usize,
+    limit: usize,
+) -> Vec<TopWin> {
     let mut stmt = match conn.prepare(
-        "SELECT owner_name, mode, dim, MIN(time_ticks) FROM MsBoxGames \
-         WHERE won = 1 AND mode = ? AND dim = ? GROUP BY owner_uuid \
-         ORDER BY MIN(time_ticks) ASC LIMIT ?;",
+        "SELECT p.name, g.kind, g.dim, MIN(g.time_ticks) \
+         FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
+         WHERE g.outcome = 1 AND g.kind = ? AND g.dim = ? \
+         GROUP BY g.owner_id ORDER BY MIN(g.time_ticks) ASC LIMIT ?;",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = stmt.query_map(params![mode, dim as i64, limit as i64], map_top_win);
+    let rows = stmt.query_map(params![kind, dim as i64, limit as i64], map_top_win);
     rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
 }
 
-pub fn top_spec_wins(mode: &str, dim: usize, limit: usize) -> Vec<TopWin> {
-    with_conn(|c| top_spec_wins_in(c, mode, dim, limit)).unwrap_or_default()
+pub fn top_spec_wins(kind: i64, dim: usize, limit: usize) -> Vec<TopWin> {
+    with_conn(|c| top_spec_wins_in(c, kind, dim, limit)).unwrap_or_default()
 }
 
 pub struct TopGames {
@@ -370,20 +622,24 @@ pub struct TopGames {
     pub games: u64,
 }
 
-/// Most games finished for one exact board spec (mode + dim), all-time.
-/// Every row in `MsBoxGames` is a finished game (rows are written on game
-/// end, win or loss), so a plain count per owner is the leaderboard. The
-/// name shown is the owner's most recent one (MAX over the group).
-pub fn top_spec_games_in(conn: &Connection, mode: &str, dim: usize, limit: usize) -> Vec<TopGames> {
+/// Most finished games (win/loss; abandoned boards do not count, so
+/// create/clear churn cannot inflate the board) for one exact spec.
+pub fn top_spec_games_in(
+    conn: &Connection,
+    kind: i64,
+    dim: usize,
+    limit: usize,
+) -> Vec<TopGames> {
     let mut stmt = match conn.prepare(
-        "SELECT MAX(owner_name), COUNT(*) FROM MsBoxGames \
-         WHERE mode = ? AND dim = ? GROUP BY owner_uuid \
-         ORDER BY COUNT(*) DESC LIMIT ?;",
+        "SELECT p.name, COUNT(*) \
+         FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
+         WHERE g.kind = ? AND g.dim = ? AND g.outcome <> 2 \
+         GROUP BY g.owner_id ORDER BY COUNT(*) DESC LIMIT ?;",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = stmt.query_map(params![mode, dim as i64, limit as i64], |row| {
+    let rows = stmt.query_map(params![kind, dim as i64, limit as i64], |row| {
         Ok(TopGames {
             owner_name: row.get::<_, String>(0)?,
             games: row.get::<_, i64>(1)? as u64,
@@ -392,8 +648,8 @@ pub fn top_spec_games_in(conn: &Connection, mode: &str, dim: usize, limit: usize
     rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
 }
 
-pub fn top_spec_games(mode: &str, dim: usize, limit: usize) -> Vec<TopGames> {
-    with_conn(|c| top_spec_games_in(c, mode, dim, limit)).unwrap_or_default()
+pub fn top_spec_games(kind: i64, dim: usize, limit: usize) -> Vec<TopGames> {
+    with_conn(|c| top_spec_games_in(c, kind, dim, limit)).unwrap_or_default()
 }
 
 pub struct TopInfinite {
@@ -404,8 +660,9 @@ pub struct TopInfinite {
 
 pub fn top_infinite_in(conn: &Connection, limit: usize) -> Vec<TopInfinite> {
     let mut stmt = match conn.prepare(
-        "SELECT player_name, top_streak, total_opened FROM MsInfiniteStats \
-         ORDER BY top_streak DESC LIMIT ?;",
+        "SELECT p.name, s.top_streak, s.total_opened \
+         FROM MsInfiniteStats s JOIN MsPlayers p ON p.player_id = s.player_id \
+         ORDER BY s.top_streak DESC, s.total_opened DESC LIMIT ?;",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -458,6 +715,36 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn rec(
+        owner: UuidKey,
+        name: &'static str,
+        kind: i64,
+        dim: usize,
+        time_ticks: u64,
+        outcome: i64,
+    ) -> GameRecord<'static> {
+        GameRecord {
+            owner,
+            owner_name: Some(name),
+            helpers: &[],
+            kind,
+            dim,
+            seed: 0xDEAD_BEEF_CAFE_F00D,
+            time_ticks,
+            outcome,
+            bombs: 3,
+            flags: 1,
+            flags_placed: 4,
+            opened: 10,
+            clicks: 12,
+            reshuffles: 2,
+            locked: false,
+            x: 100,
+            y: 64,
+            z: -200,
+        }
+    }
+
     #[test]
     fn uuid_blob_roundtrips() {
         let id = (0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210);
@@ -469,46 +756,53 @@ mod tests {
     }
 
     #[test]
-    fn box_game_record_and_bests_roundtrip() {
+    fn game_record_and_spec_stats_roundtrip() {
         let (conn, path) = memdb();
         let owner = (11, 22);
-        record_box_game_in(&conn, 30, "2D", 1200, true, owner, "Alice", &[(33, 44)]).unwrap();
-        record_box_game_in(&conn, 30, "2D", 2400, true, owner, "Alice", &[]).unwrap();
-        record_box_game_in(&conn, 30, "2D", 100, false, owner, "Alice", &[]).unwrap();
-        // Full record per spec; losses count toward games but never best.
-        let records = box_records_in(&conn, owner);
+        record_game_in(&conn, &rec(owner, "Alice", KIND_2D, 30, 1200, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec(owner, "Alice", KIND_2D, 30, 2400, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec(owner, "Alice", KIND_2D, 30, 100, OUTCOME_LOSS)).unwrap();
+        let records = spec_records_in(&conn, owner);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].games, 3);
         assert_eq!(records[0].wins, 2);
+        assert_eq!(records[0].abandoned, 0);
         assert_eq!(records[0].best_secs, Some(60));
-        // Roster rows: owner + helper.
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM MsBoxPlayers;", [], |r| r.get(0))
+        assert_eq!(records[0].avg_secs, Some(62));
+        assert_eq!(records[0].opened, 30);
+        assert_eq!(records[0].flags, 12);
+        assert_eq!(records[0].bombs, 9);
+        // Seed survives the u64 -> i64 bitcast.
+        let seed: i64 = conn
+            .query_row("SELECT seed FROM MsGames LIMIT 1;", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 2 + 1 + 1);
-        let top = top_wins_in(&conn, Some("2D"), 10);
-        assert_eq!(top.len(), 1);
-        assert_eq!(top[0].owner_name, "Alice");
-        assert!(top_wins_in(&conn, Some("3D"), 10).is_empty());
+        assert_eq!(seed as u64, 0xDEAD_BEEF_CAFE_F00D);
+        // Roster has one owner row per game (no helpers passed here).
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM MsGamePlayers;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
         dropdb(&path);
     }
 
     #[test]
     fn spec_leaderboard_filters_and_orders() {
         let (conn, path) = memdb();
-        record_box_game_in(&conn, 50, "2D", 3000, true, (1, 1), "Slow", &[]).unwrap();
-        record_box_game_in(&conn, 50, "2D", 1000, true, (2, 2), "Fast", &[]).unwrap();
-        record_box_game_in(&conn, 7, "3D", 500, true, (3, 3), "Cube", &[]).unwrap();
-        record_box_game_in(&conn, 50, "2D", 100, false, (4, 4), "Unlucky", &[]).unwrap();
-        let board = top_spec_wins_in(&conn, "2D", 50, 10);
+        record_game_in(&conn, &rec((1, 1), "Slow", KIND_2D, 50, 3000, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec((2, 2), "Fast", KIND_2D, 50, 1000, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec((3, 3), "Cube", KIND_3D, 7, 500, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec((4, 4), "Unlucky", KIND_2D, 50, 100, OUTCOME_LOSS)).unwrap();
+        let board = top_spec_wins_in(&conn, KIND_2D, 50, 10);
         assert_eq!(board.len(), 2);
         assert_eq!(board[0].owner_name, "Fast");
         assert_eq!(board[0].secs, 50);
         assert_eq!(board[1].owner_name, "Slow");
         // Losses never appear; other specs never leak in.
-        assert!(top_spec_wins_in(&conn, "2D", 30, 10).is_empty());
-        assert_eq!(top_spec_wins_in(&conn, "3D", 7, 10).len(), 1);
-        assert_eq!(top_spec_wins_in(&conn, "2D", 50, 1).len(), 1);
+        assert!(top_spec_wins_in(&conn, KIND_2D, 30, 10).is_empty());
+        assert_eq!(top_spec_wins_in(&conn, KIND_3D, 7, 10).len(), 1);
+        assert_eq!(top_spec_wins_in(&conn, KIND_2D, 50, 1).len(), 1);
+        assert!(top_wins_in(&conn, Some(KIND_3D), 10).len() == 1);
+        assert_eq!(top_wins_in(&conn, None, 10).len(), 3);
         dropdb(&path);
     }
 
@@ -516,21 +810,81 @@ mod tests {
     fn spec_games_count_ranks_and_filters() {
         let (conn, path) = memdb();
         // "Grinder" finishes three 2D-50 games (any outcome), "Fast" one.
-        record_box_game_in(&conn, 50, "2D", 3000, true, (1, 1), "Grinder", &[]).unwrap();
-        record_box_game_in(&conn, 50, "2D", 1000, true, (1, 1), "Grinder", &[]).unwrap();
-        record_box_game_in(&conn, 50, "2D", 100, false, (1, 1), "Grinder", &[]).unwrap();
-        record_box_game_in(&conn, 50, "2D", 2000, true, (2, 2), "Fast", &[]).unwrap();
-        record_box_game_in(&conn, 7, "3D", 500, true, (3, 3), "Cube", &[]).unwrap();
-        let top = top_spec_games_in(&conn, "2D", 50, 10);
+        record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 3000, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 1000, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 100, OUTCOME_LOSS)).unwrap();
+        record_game_in(&conn, &rec((2, 2), "Fast", KIND_2D, 50, 2000, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec((3, 3), "Cube", KIND_3D, 7, 500, OUTCOME_WIN)).unwrap();
+        let top = top_spec_games_in(&conn, KIND_2D, 50, 10);
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].owner_name, "Grinder");
         assert_eq!(top[0].games, 3);
         assert_eq!(top[1].owner_name, "Fast");
         assert_eq!(top[1].games, 1);
         // Other specs never leak in.
-        assert_eq!(top_spec_games_in(&conn, "3D", 7, 10)[0].games, 1);
-        assert!(top_spec_games_in(&conn, "2D", 30, 10).is_empty());
-        assert_eq!(top_spec_games_in(&conn, "2D", 50, 1).len(), 1);
+        assert_eq!(top_spec_games_in(&conn, KIND_3D, 7, 10)[0].games, 1);
+        assert!(top_spec_games_in(&conn, KIND_2D, 30, 10).is_empty());
+        assert_eq!(top_spec_games_in(&conn, KIND_2D, 50, 1).len(), 1);
+        dropdb(&path);
+    }
+
+    #[test]
+    fn abandon_counts_as_game_but_never_a_win() {
+        let (conn, path) = memdb();
+        let owner = (9, 9);
+        record_game_in(&conn, &rec(owner, "Quitter", KIND_2D, 20, 200, OUTCOME_ABANDONED))
+            .unwrap();
+        let records = spec_records_in(&conn, owner);
+        assert_eq!(records[0].games, 1);
+        assert_eq!(records[0].wins, 0);
+        assert_eq!(records[0].abandoned, 1);
+        assert_eq!(records[0].best_secs, None);
+        assert_eq!(records[0].avg_secs, None);
+        // Abandoned boards don't rank on the "most games finished" board.
+        assert!(top_spec_games_in(&conn, KIND_2D, 20, 10).is_empty());
+        // A real finish does, and the abandon still doesn't add to it.
+        record_game_in(&conn, &rec(owner, "Quitter", KIND_2D, 20, 400, OUTCOME_LOSS)).unwrap();
+        assert_eq!(top_spec_games_in(&conn, KIND_2D, 20, 10)[0].games, 1);
+        dropdb(&path);
+    }
+
+    #[test]
+    fn renames_show_the_current_name() {
+        let (conn, path) = memdb();
+        let owner = (7, 7);
+        record_game_in(&conn, &rec(owner, "Alice", KIND_2D, 20, 400, OUTCOME_WIN)).unwrap();
+        ensure_player_in(&conn, owner, Some("Alicia")).unwrap();
+        let top = top_spec_wins_in(&conn, KIND_2D, 20, 10);
+        assert_eq!(top[0].owner_name, "Alicia");
+        let history: String = conn
+            .query_row(
+                "SELECT name_history FROM MsPlayers WHERE uuid = ?;",
+                params![uuid_bytes(owner).to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(history, "Alice");
+        dropdb(&path);
+    }
+
+    #[test]
+    fn helper_credit_is_recorded() {
+        let (conn, path) = memdb();
+        let owner = (21, 21);
+        let helper = (22, 22);
+        let mut game = rec(owner, "Owner", KIND_2D, 20, 400, OUTCOME_WIN);
+        let roster = [helper];
+        game.helpers = &roster;
+        record_game_in(&conn, &game).unwrap();
+        let h = helper_record_in(&conn, helper);
+        assert_eq!((h.games, h.wins), (1, 1));
+        let own = helper_record_in(&conn, owner);
+        assert_eq!((own.games, own.wins), (0, 0));
+        // Owner row + helper row.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM MsGamePlayers;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
         dropdb(&path);
     }
 
@@ -539,37 +893,34 @@ mod tests {
         let (conn, path) = memdb();
         let owner = (55, 66);
         assert!(load_infinite_in(&conn, owner).is_none());
-        save_infinite_in(&conn, owner, "Bob", 10, 100, 2).unwrap();
-        save_infinite_in(&conn, owner, "Bobby", 42, 500, 3).unwrap();
+        save_infinite_in(&conn, owner, Some("Bob"), 10, 100, 2, 400).unwrap();
+        save_infinite_in(&conn, owner, Some("Bobby"), 42, 500, 3, 900).unwrap();
         let row = load_infinite_in(&conn, owner).unwrap();
-        assert_eq!((row.top, row.opened, row.bombs), (42, 500, 3));
+        assert_eq!(
+            (row.top, row.opened, row.bombs_clicked, row.playtime),
+            (42, 500, 3, 900)
+        );
         let top = top_infinite_in(&conn, 10);
         assert_eq!(top.len(), 1);
-        assert_eq!((top[0].name.as_str(), top[0].top), ("Bobby", 42));
+        assert_eq!(top[0].name, "Bobby");
+        assert_eq!(top[0].top, 42);
         dropdb(&path);
     }
 
     #[test]
-    fn migrations_add_missing_columns() {
-        let path = test_db_path("mig");
-        {
-            let conn = Connection::open(&path).unwrap();
-            // Simulate an older DB: table without the newer columns.
-            conn.execute_batch(
-                "CREATE TABLE MsBoxGames(game_id INTEGER PRIMARY KEY, dim INTEGER);",
+    fn daily_rollup_accumulates() {
+        let (conn, path) = memdb();
+        record_game_in(&conn, &rec((1, 1), "A", KIND_2D, 20, 400, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec((2, 2), "B", KIND_3D, 5, 200, OUTCOME_ABANDONED)).unwrap();
+        let (games, wins, abandoned, opened, flags, ticks): (i64, i64, i64, i64, i64, i64) =
+            conn.query_row(
+                "SELECT games, wins, abandoned, opened, flags, time_ticks FROM MsDaily;",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .unwrap();
-            setup_in(&conn).unwrap();
-            let ddl: String = conn
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE name = 'MsBoxGames';",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert!(ddl.contains("owner_name"), "{ddl}");
-            assert!(ddl.contains("helper_count"), "{ddl}");
-        }
-        let _ = std::fs::remove_file(&path);
+        assert_eq!((games, wins, abandoned), (2, 1, 1));
+        assert_eq!((opened, flags, ticks), (20, 8, 600));
+        dropdb(&path);
     }
 }

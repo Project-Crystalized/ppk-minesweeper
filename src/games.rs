@@ -1,4 +1,4 @@
-//! Boxed game modes (2D + 3D): creation, clicking, flagging, clearing.
+//! Sized game modes (2D + 3D): creation, clicking, flagging, clearing.
 
 use pumpkin_plugin_api::{Player, World};
 
@@ -175,7 +175,8 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
         return;
     };
 
-    let mut rng = TinyRng::new(state::next_rng_seed(owner));
+    let seed = state::next_rng_seed(owner);
+    let mut rng = TinyRng::new(seed);
     let (kind, dim, board) = cells_of(spec, origin, &mut rng);
 
     let mut bulk = helpers::BulkWriter::new(&world);
@@ -193,6 +194,10 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
         recorded: false,
         world_id,
         comp_time_ticks: 0,
+        seed,
+        reshuffles: 0,
+        clicks: 0,
+        flags_placed: 0,
         is_over: false,
         is_won: false,
     });
@@ -221,6 +226,10 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
 
 pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) {
     let owner = helpers::uuid_key(player);
+    // Record anything still unrecorded before the games disappear.
+    for id in state::player_games(owner) {
+        record_game_end(id, Some(player), true);
+    }
     let mut n = 0;
     for game in state::remove_player_games(owner) {
         // Each game may live in a different world: resolve it by id so no
@@ -385,7 +394,6 @@ pub fn needs_first_click_reshuffle(board: &[core::Cell], idx: usize) -> bool {
 /// the click itself was a no-op (flagged cell, already open, locked game).
 pub fn click_left(
     world: &World,
-    server: &pumpkin_plugin_api::Server,
     player: &Player,
     id: u32,
     idx: usize,
@@ -394,6 +402,8 @@ pub fn click_left(
     // Owner clicking after game over despawns the game.
     let over_owned = state::with_game(id, |g| g.is_over && g.owner == owner).unwrap_or(false);
     if over_owned {
+        // Retry a failed finish write before the board is removed.
+        record_game_end(id, Some(player), false);
         clear_game_in_world(world, id);
         tell(player, "Game cleared. Start a new one with /ms.");
         return true;
@@ -401,6 +411,7 @@ pub fn click_left(
     // Lock / state guards run inside one mutation so the checks see a
     // consistent board. Every early exit still returns true (swallow click).
     let outcome = state::with_game_mut(id, |game| {
+        game.clicks = game.clicks.saturating_add(1);
         match decide_left(game, owner, idx) {
             ClickDecision::Ignore => return Outcome::Swallowed,
             ClickDecision::DenyLocked => return Outcome::Locked,
@@ -409,9 +420,9 @@ pub fn click_left(
         // First-click protection (mirrors the old regenerate_if_not_empty):
         // never let the opening click be a bomb or a number.
         if needs_first_click_reshuffle(&game.board, idx) {
-            let origin = game.board.first().map(|c| c.pos).unwrap_or_default();
+            let origin = game.origin();
             let mut seed = state::next_rng_seed(game.owner);
-            for _ in 0..64 {
+            for attempt in 0..64u32 {
                 seed = seed.wrapping_add(0x9E3779B97F4A7C15);
                 let mut rng = TinyRng::new(seed);
                 let board = match game.kind {
@@ -424,6 +435,8 @@ pub fn click_left(
                 };
                 if board[idx].content == CellContent::Empty {
                     game.board = board;
+                    game.seed = seed;
+                    game.reshuffles = attempt + 1;
                     break;
                 }
             }
@@ -477,56 +490,115 @@ pub fn click_left(
         // Swallowed / played / missing game: always consume so the underlying
         // moss block is never actually broken.
         _ => {
-            maybe_record_finished_game(server, player, id);
+            record_game_end(id, Some(player), false);
             true
         }
     }
 }
 
-/// Persist a game that just ended (win or loss), exactly once. Retries on
-/// later clicks until the write succeeds, so a transient DB failure loses
-/// nothing (the `recorded` flag only flips on success).
-fn maybe_record_finished_game(server: &pumpkin_plugin_api::Server, clicker: &Player, id: u32) {
+/// Persist a finished (or, when `allow_unfinished`, abandoned) game exactly
+/// once. Retries on later clicks until the write succeeds, so a transient DB
+/// failure loses nothing (the `recorded` flag only flips on success).
+fn record_game_end(id: u32, clicker: Option<&Player>, allow_unfinished: bool) {
     let snap = state::with_game(id, |g| {
+        let origin = g.origin();
         (
             g.kind,
             g.dim,
+            g.seed,
             g.comp_time_ticks,
             g.is_over,
             g.is_won,
             g.owner,
             g.helpers.clone(),
             g.recorded,
+            g.locked,
+            g.flags_placed,
+            g.clicks,
+            g.reshuffles,
+            g.opened_count(),
+            g.flag_count(),
+            g.bomb_total(),
+            origin.x,
+            origin.y,
+            origin.z,
         )
     });
-    let Some((kind, dim, ticks, over, won, owner, helpers, recorded)) = snap else {
+    #[allow(clippy::type_complexity)]
+    let Some((
+        kind,
+        dim,
+        seed,
+        ticks,
+        over,
+        won,
+        owner,
+        helpers,
+        recorded,
+        locked,
+        flags_placed,
+        clicks,
+        reshuffles,
+        opened,
+        flags,
+        bombs,
+        x,
+        y,
+        z,
+    )) = snap
+    else {
         return;
     };
-    if !over || recorded {
+    if recorded {
         return;
     }
-    let online: Vec<(crate::state::UuidKey, String)> = server
-        .get_all_players()
-        .iter()
-        .map(|p| (helpers::uuid_key(p), p.get_name()))
-        .collect();
-    let name_of = |u: crate::state::UuidKey| {
-        if u == helpers::uuid_key(clicker) {
-            return clicker.get_name();
+    let outcome = if over {
+        if won {
+            crate::db::OUTCOME_WIN
+        } else {
+            crate::db::OUTCOME_LOSS
         }
-        online
-            .iter()
-            .find(|(k, _)| *k == u)
-            .map(|(_, n)| n.clone())
-            .unwrap_or_else(|| "?".to_string())
+    } else if allow_unfinished {
+        crate::db::OUTCOME_ABANDONED
+    } else {
+        return;
     };
-    let mode = match kind {
-        GameKind::TwoD => "2D",
-        GameKind::ThreeD => "3D",
+    // The owner's name is only guaranteed when the owner is the finisher;
+    // otherwise the roster row written on join is authoritative.
+    let owner_name = clicker
+        .filter(|p| helpers::uuid_key(p) == owner)
+        .map(|p| p.get_name());
+    let record = crate::db::GameRecord {
+        owner,
+        owner_name: owner_name.as_deref(),
+        helpers: &helpers,
+        kind: match kind {
+            GameKind::TwoD => crate::db::KIND_2D,
+            GameKind::ThreeD => crate::db::KIND_3D,
+        },
+        dim,
+        seed,
+        time_ticks: ticks,
+        outcome,
+        bombs,
+        flags,
+        flags_placed,
+        opened,
+        clicks,
+        reshuffles,
+        locked,
+        x,
+        y,
+        z,
     };
-    if crate::db::record_box_game(dim, mode, ticks, won, owner, &name_of(owner), &helpers) {
+    if crate::db::record_game(&record) {
         state::with_game_mut(id, |g| g.recorded = true);
     }
+}
+
+/// Record an unfinished game before removing it (`/ms clear`, leave).
+pub fn record_abandoned(id: u32, owner: &Player) {
+    record_game_end(id, Some(owner), true);
 }
 
 enum Outcome {
@@ -573,6 +645,7 @@ pub fn click_right(world: &World, player: &Player, id: u32, idx: usize) -> bool 
         let (flagged, pos) = match cell.state {
             CellState::Closed => {
                 cell.state = CellState::Flagged;
+                game.flags_placed = game.flags_placed.saturating_add(1);
                 (true, cell.pos)
             }
             CellState::Flagged => {
@@ -729,6 +802,10 @@ mod tests {
             recorded: false,
             world_id: "test_world".to_string(),
             comp_time_ticks: 0,
+            seed: 1,
+            reshuffles: 0,
+            clicks: 0,
+            flags_placed: 0,
             is_over: false,
             is_won: false,
         }
@@ -807,6 +884,10 @@ mod tests {
             recorded: false,
             world_id: "w".to_string(),
             comp_time_ticks: 0,
+            seed: 1,
+            reshuffles: 0,
+            clicks: 0,
+            flags_placed: 0,
             is_over: false,
             is_won: false,
         };
@@ -833,6 +914,10 @@ mod tests {
             recorded: false,
             world_id: "w".to_string(),
             comp_time_ticks: 0,
+            seed: 1,
+            reshuffles: 0,
+            clicks: 0,
+            flags_placed: 0,
             is_over: false,
             is_won: false,
         };

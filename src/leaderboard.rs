@@ -29,7 +29,8 @@ pub const REFRESH_TICKS: u64 = 1200;
 struct Board {
     tag: &'static str,
     title: &'static str,
-    mode: &'static str,
+    /// `db::KIND_2D` / `db::KIND_3D` (the board's dimensionality).
+    game_kind: i64,
     dim: usize,
     /// What the lines rank: fastest win times or most games finished.
     kind: BoardKind,
@@ -74,7 +75,7 @@ const BOARDS: [Board; 4] = [
     Board {
         tag: "ms_lb_2d50",
         title: "2D 50x50 All-Time Best",
-        mode: "2D",
+        game_kind: crate::db::KIND_2D,
         dim: 50,
         kind: BoardKind::FastestWins,
         facing: Facing::North,
@@ -85,7 +86,7 @@ const BOARDS: [Board; 4] = [
     Board {
         tag: "ms_lb_3d7",
         title: "3D 7x7x7 All-Time Best",
-        mode: "3D",
+        game_kind: crate::db::KIND_3D,
         dim: 7,
         kind: BoardKind::FastestWins,
         facing: Facing::North,
@@ -96,7 +97,7 @@ const BOARDS: [Board; 4] = [
     Board {
         tag: "ms_lb_2d50_games",
         title: "2D 50x50 Most Games Finished",
-        mode: "2D",
+        game_kind: crate::db::KIND_2D,
         dim: 50,
         kind: BoardKind::MostGames,
         facing: Facing::East,
@@ -107,7 +108,7 @@ const BOARDS: [Board; 4] = [
     Board {
         tag: "ms_lb_3d7_games",
         title: "3D 7x7x7 Most Games Finished",
-        mode: "3D",
+        game_kind: crate::db::KIND_3D,
         dim: 7,
         kind: BoardKind::MostGames,
         facing: Facing::East,
@@ -157,7 +158,7 @@ fn board_text(board: &Board) -> String {
     let mut lines = vec![format!("§6§l{}", board.title)];
     match board.kind {
         BoardKind::FastestWins => {
-            for (i, w) in crate::db::top_spec_wins(board.mode, board.dim, 10)
+            for (i, w) in crate::db::top_spec_wins(board.game_kind, board.dim, 10)
                 .iter()
                 .enumerate()
             {
@@ -165,7 +166,7 @@ fn board_text(board: &Board) -> String {
             }
         }
         BoardKind::MostGames => {
-            for (i, w) in crate::db::top_spec_games(board.mode, board.dim, 10)
+            for (i, w) in crate::db::top_spec_games(board.game_kind, board.dim, 10)
                 .iter()
                 .enumerate()
             {

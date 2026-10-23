@@ -225,11 +225,25 @@ impl CommandHandler for FlagCommand {
 pub struct StatsCommand;
 
 /// Board label with the right dimensionality ("2D 30x30", "3D 5x5x5").
-fn spec_label(mode: &str, dim: usize) -> String {
-    if mode == "3D" {
+fn spec_label(kind: i64, dim: usize) -> String {
+    if kind == crate::db::KIND_3D {
         format!("3D {dim}x{dim}x{dim}")
     } else {
-        format!("{mode} {dim}x{dim}")
+        format!("2D {dim}x{dim}")
+    }
+}
+
+/// Compact lifetime duration ("2h 5m", "12m", "45s") from ticks (20/s).
+fn fmt_duration(ticks: u64) -> String {
+    let secs = ticks / 20;
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m")
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -246,25 +260,43 @@ impl CommandHandler for StatsCommand {
         };
         let key = uuid_key(&player);
         let mut lines = vec![format!("Stats for {}:", player.get_name())];
-        let records = crate::db::box_records(key);
+        let records = crate::db::spec_records(key);
         if records.is_empty() {
-            lines.push("No recorded box games yet.".to_string());
+            lines.push("No recorded games yet.".to_string());
         }
         for r in records {
             let games = if r.games == 1 { "1 game".into() } else { format!("{} games", r.games) };
             let wins = if r.wins == 1 { "1 win".into() } else { format!("{} wins", r.wins) };
-            match r.best_secs {
-                Some(secs) => lines.push(format!(
-                    "{}: {games}, {wins}, best {secs}s",
-                    spec_label(&r.mode, r.dim)
-                )),
-                None => lines.push(format!("{}: {games}, {wins}", spec_label(&r.mode, r.dim))),
+            let mut line = format!("{}: {games}, {wins}", spec_label(r.kind, r.dim));
+            if r.abandoned > 0 {
+                line.push_str(&format!(", {} abandoned", r.abandoned));
             }
+            if let Some(best) = r.best_secs {
+                line.push_str(&format!(", best {best}s"));
+            }
+            if let Some(avg) = r.avg_secs {
+                line.push_str(&format!(", avg {avg}s"));
+            }
+            lines.push(line);
+            lines.push(format!(
+                "  {} opened, {} flags placed, {} bombs",
+                r.opened, r.flags, r.bombs
+            ));
+        }
+        let helper = crate::db::helper_record(key);
+        if helper.games > 0 {
+            lines.push(format!(
+                "Co-op: {} games as helper, {} wins",
+                helper.games, helper.wins
+            ));
         }
         match crate::db::load_infinite(key) {
             Some(row) => lines.push(format!(
-                "Infinite: best streak {} ({} opened, {} bombs)",
-                row.top, row.opened, row.bombs
+                "Infinite: best streak {} ({} opened, {} bombs clicked, {} played)",
+                row.top,
+                row.opened,
+                row.bombs_clicked,
+                fmt_duration(row.playtime)
             )),
             None => lines.push("Infinite: no recorded cells yet.".to_string()),
         }
@@ -282,7 +314,7 @@ impl CommandHandler for TopCommand {
         _server: Server,
         _args: ConsumedArgs,
     ) -> Result<i32, CommandError> {
-        let mut lines = vec!["Top box wins (fastest):".to_string()];
+        let mut lines = vec!["Top wins (fastest):".to_string()];
         let wins = crate::db::top_wins(None, 10);
         if wins.is_empty() {
             lines.push("No recorded wins yet.".to_string());
@@ -292,7 +324,7 @@ impl CommandHandler for TopCommand {
                 "{}. {} - {} in {}s",
                 i + 1,
                 w.owner_name,
-                spec_label(&w.mode, w.dim),
+                spec_label(w.kind, w.dim),
                 w.secs
             ));
         }

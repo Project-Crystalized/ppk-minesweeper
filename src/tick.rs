@@ -47,6 +47,16 @@ fn tick(server: Server) {
         let key = uuid_key(&player);
         let world = player.get_world();
         let infinite = crate::infinite::is_infinite_world(&world);
+        if infinite {
+            // Lifetime time in the endless world (1 tick loop = 1 second).
+            state::with_session_mut(key, |s| {
+                s.playtime_ticks = s.playtime_ticks.saturating_add(20);
+            });
+            // Flush totals every 30 s so idling playtime survives a crash.
+            if now % 600 == 0 {
+                crate::infinite::persist_session_for(key, &player);
+            }
+        }
         // Show the nearest board (any owner), like the old server's
         // `show_action_bar` which picked the closest `ActionState.center`.
         // Falls back to the player's own first game when worlds differ.
