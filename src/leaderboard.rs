@@ -48,27 +48,29 @@ enum BoardKind {
 }
 
 /// Fixed text orientation. The display's default fixed plane faces south
-/// (+Z); these are 180°/90° rotations about Y applied on top.
+/// (+Z); these are rotations about Y applied on top.
 #[derive(Clone, Copy, PartialEq)]
 enum Facing {
+    South,
     North,
-    East,
 }
 
 impl Facing {
     /// Left-rotation quaternion for the display transformation.
     fn quaternion(self) -> (f32, f32, f32, f32) {
         match self {
+            // Identity: the default plane already faces south.
+            Facing::South => (0.0, 0.0, 0.0, 1.0),
             // 180° about Y.
             Facing::North => (0.0, 1.0, 0.0, 0.0),
-            // +90° about Y takes +Z (south) to +X (east).
-            Facing::East => (0.0, 0.7071, 0.0, 0.7071),
         }
     }
 }
 
-/// Hardcoded boards, all in one row at z=29 (16-block x spacing):
-/// fastest-wins and most-games pairs for the two preset specs.
+/// Hardcoded boards in the spawn plaza: two rows of three spots each
+/// (x spacing 13), south wall at z=128 facing south and north wall at
+/// z=183 facing north. Four boards fill four of the six spots; the x=422
+/// spots on both walls are reserved for future boards.
 /// Line 0 is the header at the TOP; entries stack downward from it.
 /// Edit the numbers to move a board.
 const BOARDS: [Board; 4] = [
@@ -78,10 +80,10 @@ const BOARDS: [Board; 4] = [
         game_kind: crate::db::KIND_2D,
         dim: 50,
         kind: BoardKind::FastestWins,
-        facing: Facing::North,
-        x: 4.0,
-        y: 2.0,
-        z: 29.0,
+        facing: Facing::South,
+        x: 396.0,
+        y: 75.0,
+        z: 128.0,
     },
     Board {
         tag: "ms_lb_3d7",
@@ -89,10 +91,10 @@ const BOARDS: [Board; 4] = [
         game_kind: crate::db::KIND_3D,
         dim: 7,
         kind: BoardKind::FastestWins,
-        facing: Facing::North,
-        x: -12.0,
-        y: 2.0,
-        z: 29.0,
+        facing: Facing::South,
+        x: 409.0,
+        y: 75.0,
+        z: 128.0,
     },
     Board {
         tag: "ms_lb_2d50_games",
@@ -100,10 +102,10 @@ const BOARDS: [Board; 4] = [
         game_kind: crate::db::KIND_2D,
         dim: 50,
         kind: BoardKind::MostGames,
-        facing: Facing::East,
-        x: -26.0,
-        y: 2.0,
-        z: 9.0,
+        facing: Facing::North,
+        x: 396.0,
+        y: 75.0,
+        z: 183.0,
     },
     Board {
         tag: "ms_lb_3d7_games",
@@ -111,10 +113,10 @@ const BOARDS: [Board; 4] = [
         game_kind: crate::db::KIND_3D,
         dim: 7,
         kind: BoardKind::MostGames,
-        facing: Facing::East,
-        x: -27.0,
-        y: 2.0,
-        z: -17.0,
+        facing: Facing::North,
+        x: 409.0,
+        y: 75.0,
+        z: 183.0,
     },
 ];
 
@@ -199,15 +201,16 @@ fn style_new_display(display: &TextDisplayEntity, facing: Facing) {
     display.get_display().set_transformation(
         TransformationBuilder::new().left_rotation(x, y, z, w).build(),
     );
-    // Full-light override: the boards sit low (y=2) where the sampled light
-    // is near zero, rendering the text dark. Vanilla packs block/sky light
-    // as two 4-bit nibbles; 255 sets both to 15 regardless of nibble order.
+    // Full-light override: the sampled light at the display's own position
+    // can be near zero (e.g. indoor/covered spots), rendering the text dark.
+    // Vanilla packs block/sky light as two 4-bit nibbles; 255 sets both to
+    // 15 regardless of nibble order.
     display.get_display().set_brightness(255);
 }
 
 /// Squared wipe radius around a board's spot: at boot, every text display
-/// inside it is removed (leftovers/legacy/stacked boards). The two boards
-/// are 16 blocks apart, so a 6-block radius never crosses between them.
+/// inside it is removed (leftovers/legacy/stacked boards). Boards in a row
+/// are 13 blocks apart, so a 6-block radius never crosses between them.
 const WIPE_DIST2: f64 = 36.0;
 
 fn dist2(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
