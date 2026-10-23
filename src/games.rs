@@ -22,6 +22,10 @@ pub struct NewGameSpec {
 }
 
 impl NewGameSpec {
+    pub const TWO_D_20: Self = Self {
+        kind: GameKind::TwoD,
+        dim: 20,
+    };
     pub const TWO_D_30: Self = Self {
         kind: GameKind::TwoD,
         dim: 30,

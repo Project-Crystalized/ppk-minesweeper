@@ -8,7 +8,8 @@ use pumpkin_plugin_api::{
 use crate::games::NewGameSpec;
 
 /// (display name, game) pairs. Names match the old Valence items.
-const STARTERS: [(&str, NewGameSpec); 4] = [
+const STARTERS: [(&str, NewGameSpec); 5] = [
+    ("Minesweeper20x20", NewGameSpec::TWO_D_20),
     ("Minesweeper30x30", NewGameSpec::TWO_D_30),
     ("Minesweeper50x50", NewGameSpec::TWO_D_50),
     ("Minesweeper3d5x5", NewGameSpec::THREE_D_5),
@@ -120,16 +121,16 @@ pub fn held_starter(player: &Player) -> Option<NewGameSpec> {
 /// Anything placed at 0-8 shows up in the crafting/armor area (invisible in
 /// the HUD, appearing as a "second set" when the inventory is opened), and
 /// 36-40 render over the hotbar while actually sitting in equipment slots.
-/// So the kit lives in the main grid (9-14), and generic writes never touch
+/// So the kit lives in the main grid (9-15), and generic writes never touch
 /// 0-8 or 36-40.
 /// Last storage slot: 36-39 armor, 40 offhand.
 pub const OFFHAND_SLOT: u8 = 40;
 /// Display-safe grid range: storage and window numbering agree here.
 const GRID_START: u8 = 9;
 
-/// Fixed main-grid layout: 4 starters, then the lock toggle and the flag
-/// color switcher (slots 9-14).
-fn kit_grid_layout(player: &Player) -> [(u8, ItemStack); 6] {
+/// Fixed main-grid layout: 5 starters, then the lock toggle and the flag
+/// color switcher (slots 9-15).
+fn kit_grid_layout(player: &Player) -> [(u8, ItemStack); 7] {
     use crate::helpers::uuid_key;
     let key = uuid_key(player);
     let any_locked = crate::state::all_games_detailed()
@@ -140,16 +141,17 @@ fn kit_grid_layout(player: &Player) -> [(u8, ItemStack); 6] {
         (10, make_stick(STARTERS[1].0)),
         (11, make_stick(STARTERS[2].0)),
         (12, make_stick(STARTERS[3].0)),
-        (13, make_lock_item(any_locked)),
+        (13, make_stick(STARTERS[4].0)),
+        (14, make_lock_item(any_locked)),
         (
-            14,
+            15,
             make_flag_item(crate::state::flag_block_for(key)),
         ),
     ]
 }
 
 /// Join flow: wipe everything (main, armor, offhand) so no stale kit pieces
-/// survive anywhere, then lay out the full 6-piece kit in the display-safe
+/// survive anywhere, then lay out the full 7-piece kit in the display-safe
 /// grid. Equipment slots are cleared explicitly on top of `clear_all` so a
 /// host that ever changes `clear_all` semantics can't leave ghosts behind.
 /// Slots 41+ are never touched: the server stores nothing there while the
