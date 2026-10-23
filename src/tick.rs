@@ -20,12 +20,16 @@ fn tick(server: Server) {
         return;
     }
 
-    // Advance game timers (short critical sections).
-    let ids: Vec<u32> = state::all_games_snapshot()
+    // Advance game timers (short critical sections). A disconnected owner's
+    // timer is paused: the board stays, but time spent offline does not count.
+    let ids: Vec<(u32, state::UuidKey)> = state::all_games_snapshot()
         .iter()
-        .map(|(id, _, _, _, _, _, _)| *id)
+        .map(|(id, owner, _, _, _, _, _)| (*id, *owner))
         .collect();
-    for id in ids {
+    for (id, owner) in ids {
+        if !state::is_online(owner) {
+            continue;
+        }
         state::with_game_mut(id, |g| {
             if !g.is_over {
                 g.comp_time_ticks += 20;

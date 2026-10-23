@@ -1,4 +1,4 @@
-//! Pumpkin event handlers: join help, leave cleanup, left-click opens,
+//! Pumpkin event handlers: join setup, leave accounting, left-click opens,
 //! right-click flags.
 
 use pumpkin_plugin_api::{
@@ -30,6 +30,10 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
             crate::helpers::uuid_key(&event.player),
             &event.player.get_name(),
         );
+        crate::state::update_owner_name(
+            crate::helpers::uuid_key(&event.player),
+            &event.player.get_name(),
+        );
         crate::infinite::hydrate_session(&event.player);
         tell(
             &event.player,
@@ -44,23 +48,15 @@ pub struct LeaveListener;
 impl EventHandler<PlayerLeaveEvent> for LeaveListener {
     fn handle(
         &self,
-        server: Server,
+        _server: Server,
         event: EventData<PlayerLeaveEvent>,
     ) -> EventData<PlayerLeaveEvent> {
         let owner = uuid_key(&event.player);
         crate::sidebar::clear(&event.player);
-        // Record unfinished games as abandoned, then drop them.
-        for id in state::player_games(owner) {
-            games::record_abandoned(id, &event.player);
-        }
+        // Boards deliberately survive disconnects: an owner coming back keeps
+        // their progress, and helpers can keep playing unlocked boards.
         crate::db::add_playtime(owner, state::take_playtime_ticks(owner));
         infinite::persist_session_for(owner, &event.player);
-        for game in state::remove_player_games(owner) {
-            // Best effort: clear blocks in the game's world if still loaded.
-            if let Some(world) = server.get_world_by_name(&game.world_id) {
-                games::clear_blocks(&world, &game);
-            }
-        }
         event
     }
 }

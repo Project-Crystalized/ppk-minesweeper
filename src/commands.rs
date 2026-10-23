@@ -12,7 +12,7 @@ use crate::{games::NewGameSpec, helpers::uuid_key, state::GameKind};
 
 fn help_text() -> TextComponent {
     TextComponent::text(&format!(
-        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. /ms kit re-gives sticks + lock/flag items. /ms lock [id] toggles game locks (or right-click the horse-armor item). /ms flag cycles flag color. /ms clear removes your games. /ms stats shows your records. /ms top shows leaderboards. /ms infinite teleports to endless mode.",
+        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. Lock/unlock with the horse-armor item and cycle flag color with the wool item. /ms clear removes your games. /ms clearnearest (admin) clears the closest board. /ms stats shows your records. /ms top shows leaderboards. /ms infinite teleports to endless mode.",
         crate::games::NewGameSpec::all_labels()
     ))
 }
@@ -155,70 +155,39 @@ impl CommandHandler for InfiniteCommand {
     }
 }
 
-pub struct KitCommand;
+pub struct ClearNearestCommand;
 
-impl CommandHandler for KitCommand {
+impl CommandHandler for ClearNearestCommand {
     fn handle(
         &self,
         sender: CommandSender,
         _server: Server,
         _args: ConsumedArgs,
     ) -> Result<i32, CommandError> {
+        use pumpkin_plugin_api::command_wit::PermissionLevel;
+        if !sender.has_permission_level(PermissionLevel::Three) {
+            sender.send_error(TextComponent::text(
+                "You need admin permission (level 3) to clear the closest board.",
+            ));
+            return Ok(0);
+        }
         let Some(player) = player_of(&sender) else {
-            sender.send_error(TextComponent::text("Only players can get kits."));
+            sender.send_error(TextComponent::text("Only players have a position."));
             return Ok(0);
         };
-        crate::sticks::give_kit_and_tell(&player);
-        Ok(1)
-    }
-}
-
-pub struct LockCommand;
-
-impl CommandHandler for LockCommand {
-    fn handle(
-        &self,
-        sender: CommandSender,
-        _server: Server,
-        args: ConsumedArgs,
-    ) -> Result<i32, CommandError> {
-        let Some(player) = player_of(&sender) else {
-            sender.send_error(TextComponent::text("Only players can lock games."));
-            return Ok(0);
-        };
-        let id = match args.get_value("id") {
-            Arg::Num(Ok(Number::Int32(n))) => u32::try_from(n).ok(),
-            Arg::Num(Ok(Number::Int64(n))) => u32::try_from(n).ok(),
-            _ => None,
-        };
-        let line = crate::games::toggle_lock_report(uuid_key(&player), id);
-        sender.send_message(TextComponent::text(&line));
-        crate::sticks::refresh_utility_items(&player);
-        Ok(1)
-    }
-}
-
-pub struct FlagCommand;
-
-impl CommandHandler for FlagCommand {
-    fn handle(
-        &self,
-        sender: CommandSender,
-        _server: Server,
-        _args: ConsumedArgs,
-    ) -> Result<i32, CommandError> {
-        let Some(player) = player_of(&sender) else {
-            sender.send_error(TextComponent::text("Only players can switch flags."));
-            return Ok(0);
-        };
-        let name = {
-            let key = uuid_key(&player);
-            crate::state::cycle_flag_style(key);
-            crate::state::flag_style_name(key)
-        };
-        sender.send_message(TextComponent::text(&format!("Flag color: {name}.")));
-        crate::sticks::refresh_utility_items(&player);
-        Ok(1)
+        let world = player.get_world();
+        match crate::games::admin_clear_nearest(&world, player.get_position()) {
+            Some((id, owner_name, label)) => {
+                sender.send_message(TextComponent::text(&format!(
+                    "Cleared {label} #{id} owned by {owner_name}."
+                )));
+                Ok(1)
+            }
+            None => {
+                sender.send_error(TextComponent::text("No board found in your current world."));
+                Ok(0)
+            }
+        }
     }
 }
 

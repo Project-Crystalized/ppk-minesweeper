@@ -5,7 +5,7 @@ use pumpkin_plugin_api::{
     common::Hand, text::TextComponent, ItemStack, ItemStackExt, Player,
 };
 
-use crate::{games::NewGameSpec, helpers::tell};
+use crate::games::NewGameSpec;
 
 /// (display name, game) pairs. Names match the old Valence items.
 const STARTERS: [(&str, NewGameSpec); 6] = [
@@ -129,10 +129,7 @@ pub fn held_starter(player: &Player) -> Option<NewGameSpec> {
 pub const OFFHAND_SLOT: u8 = 40;
 /// Display-safe grid range: storage and window numbering agree here.
 const GRID_START: u8 = 9;
-const GRID_END: u8 = 36; // exclusive
 
-/// Fixed main-grid layout: 5 starters, then the lock toggle and the flag
-/// color switcher. (The 6th starter rides in the offhand, see below.)
 /// Fixed main-grid layout: 6 starters, then the lock toggle and the flag
 /// color switcher (slots 9-16).
 fn kit_grid_layout(player: &Player) -> [(u8, ItemStack); 8] {
@@ -156,21 +153,6 @@ fn kit_grid_layout(player: &Player) -> [(u8, ItemStack); 8] {
     ]
 }
 
-fn has_named(player: &Player, name: &str) -> bool {
-    // Full storage range: kit pieces stranded in armor/offhand slots (from
-    // before the hotbar fix) must still count as "already have", or `/ms kit`
-    // grants a second copy.
-    (0..=OFFHAND_SLOT).any(|slot| {
-        player
-            .get_inventory_item(slot)
-            .is_some_and(|s| s.get_custom_name().is_some_and(|c| c.get_text() == name))
-    })
-}
-
-fn first_free_grid_slot(player: &Player) -> Option<u8> {
-    (GRID_START..GRID_END).find(|slot| player.get_inventory_item(*slot).is_none())
-}
-
 /// Join flow: wipe everything (main, armor, offhand) so no stale kit pieces
 /// survive anywhere, then lay out the full 8-piece kit in the display-safe
 /// grid. Equipment slots are cleared explicitly on top of `clear_all` so a
@@ -187,108 +169,6 @@ pub fn give_fresh_kit(player: &Player) -> usize {
     for (slot, stack) in kit_grid_layout(player) {
         player.set_inventory_item(slot, Some(stack));
         given += 1;
-    }
-    given
-}
-
-/// Remove duplicate kit pieces across the whole storage (0-40) and relocate
-/// lone equipment-slot copies into the grid when there is room. Keeps one
-/// copy per piece, preferring the display-safe grid. Returns stacks removed.
-pub fn dedupe_kit(player: &Player) -> usize {
-    let mut removed = 0;
-    for (name, _) in STARTERS {
-        removed += dedupe_named(player, name, None);
-    }
-    removed += dedupe_named(player, FLAG_SWITCH_NAME, None);
-    // Lock toggle: two display names, one identity.
-    removed += dedupe_named(player, LOCKED_NAME, Some(UNLOCKED_NAME));
-    removed
-}
-
-/// Keep a single copy of the item called `primary` (or `alias`): a copy in
-/// the display-safe grid wins, otherwise the first copy overall. A lone copy
-/// stuck in an equipment slot moves to the grid when a slot is free, else it
-/// stays; every other occurrence is cleared.
-fn dedupe_named(player: &Player, primary: &str, alias: Option<&str>) -> usize {
-    let mut hits = Vec::new();
-    for slot in 0..=OFFHAND_SLOT {
-        let hit = player.get_inventory_item(slot).is_some_and(|s| {
-            s.get_custom_name()
-                .is_some_and(|c| c.get_text() == primary || alias.is_some_and(|a| c.get_text() == a))
-        });
-        if hit {
-            hits.push(slot);
-        }
-    }
-    if hits.is_empty() {
-        return 0;
-    }
-    // Grid copy wins (renders correctly); otherwise the first copy overall.
-    let mut keeper = hits
-        .iter()
-        .find(|s| (GRID_START..GRID_END).contains(s))
-        .or(hits.first())
-        .copied()
-        .unwrap_or(hits[0]);
-    // A keeper stuck in an equipment slot (36-40) shows in the wrong place:
-    // move it to the grid when a slot is free, else leave it.
-    if keeper >= GRID_END {
-        if let Some(free) = first_free_grid_slot(player) {
-            if let Some(stack) = player.get_inventory_item(keeper) {
-                player.set_inventory_item(free, Some(stack));
-                player.set_inventory_item(keeper, None);
-                keeper = free;
-            }
-        }
-    }
-    let mut removed = 0;
-    for slot in hits {
-        if slot == keeper {
-            continue;
-        }
-        player.set_inventory_item(slot, None);
-        removed += 1;
-    }
-    removed
-}
-
-/// Additive top-up (`/ms kit`): first collapse any duplicates (and pull
-/// equipment-slot strays back to the grid), then grant only truly missing
-/// pieces. Grid pieces prefer their fixed layout slot and fall back to the
-/// first free grid slot. Generic writes never touch 0-8 or 36-40 (host
-/// renders those in the wrong place); the offhand is left alone.
-pub fn give_kit(player: &Player) -> usize {
-    dedupe_kit(player);
-    refresh_utility_items(player);
-    let mut given = 0;
-    let place_grid = |player: &Player, slot: u8, stack: ItemStack| {
-        if player.get_inventory_item(slot).is_none() {
-            player.set_inventory_item(slot, Some(stack));
-            true
-        } else if let Some(free) = first_free_grid_slot(player) {
-            player.set_inventory_item(free, Some(stack));
-            true
-        } else {
-            false
-        }
-    };
-    for (slot, stack) in kit_grid_layout(player) {
-        let name = stack
-            .get_custom_name()
-            .map(|c| c.get_text())
-            .unwrap_or_default();
-        // The lock piece changes identity with state; either name counts.
-        let present = if name == LOCKED_NAME || name == UNLOCKED_NAME {
-            has_named(player, LOCKED_NAME) || has_named(player, UNLOCKED_NAME)
-        } else {
-            has_named(player, &name)
-        };
-        if present {
-            continue;
-        }
-        if place_grid(player, slot, stack) {
-            given += 1;
-        }
     }
     given
 }
@@ -321,17 +201,5 @@ pub fn refresh_utility_items(player: &Player) {
         } else if name == FLAG_SWITCH_NAME {
             player.set_inventory_item(slot, Some(make_flag_item(flag_block)));
         }
-    }
-}
-
-pub fn give_kit_and_tell(player: &Player) {
-    let given = give_kit(player);
-    if given > 0 {
-        tell(
-            player,
-            "Starter sticks added! Right-click with one to start that game.",
-        );
-    } else {
-        tell(player, "You already have all starter sticks.");
     }
 }

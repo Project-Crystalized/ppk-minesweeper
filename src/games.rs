@@ -189,6 +189,7 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
         dim,
         board,
         owner,
+        owner_name: player.get_name(),
         helpers: Vec::new(),
         locked: false,
         recorded: false,
@@ -228,7 +229,7 @@ pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) 
     let owner = helpers::uuid_key(player);
     // Record anything still unrecorded before the games disappear.
     for id in state::player_games(owner) {
-        record_game_end(id, Some(player), true);
+        record_game_end(id, true);
     }
     let mut n = 0;
     for game in state::remove_player_games(owner) {
@@ -243,8 +244,8 @@ pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) 
     tell(player, &format!("Cleared {n} game(s)."));
 }
 
-/// Write AIR over a game's cells. Bulk (chunk-level); shared by punch-clear,
-/// `/ms clear` and the leave-event cleanup.
+/// Write AIR over a game's cells. Bulk (chunk-level); shared by punch-clear
+/// and `/ms clear`.
 pub fn clear_blocks(world: &World, game: &GameInstance) {
     let mut bulk = helpers::BulkWriter::new(world);
     for cell in &game.board {
@@ -256,6 +257,32 @@ pub fn clear_game_in_world(world: &World, id: u32) {
     if let Some(game) = state::remove_game(id) {
         clear_blocks(world, &game);
     }
+}
+
+/// Admin helper: record the board closest to `pos` (unfinished games become
+/// abandoned) and clear it. Returns `(game_id, owner_name, label)` for
+/// feedback, or `None` when the current world has no boards.
+pub fn admin_clear_nearest(world: &World, pos: (f64, f64, f64)) -> Option<(u32, String, String)> {
+    let world_id = world.get_id();
+    let (_, game) = state::all_games_detailed()
+        .into_iter()
+        .filter(|g| g.world_id == world_id)
+        .map(|g| {
+            let dx = g.center.x as f64 - pos.0;
+            let dy = g.center.y as f64 - pos.1;
+            let dz = g.center.z as f64 - pos.2;
+            (dx * dx + dy * dy + dz * dz, g)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)))?;
+    let label = NewGameSpec {
+        kind: game.kind,
+        dim: game.dim,
+    }
+    .label();
+    let owner_name = game.owner_name.clone();
+    record_game_end(game.id, true);
+    clear_game_in_world(world, game.id);
+    Some((game.id, owner_name, label))
 }
 
 fn reveal_all(world: &World, game: &GameInstance) {
@@ -403,7 +430,7 @@ pub fn click_left(
     let over_owned = state::with_game(id, |g| g.is_over && g.owner == owner).unwrap_or(false);
     if over_owned {
         // Retry a failed finish write before the board is removed.
-        record_game_end(id, Some(player), false);
+        record_game_end(id, false);
         clear_game_in_world(world, id);
         tell(player, "Game cleared. Start a new one with /ms.");
         return true;
@@ -490,7 +517,7 @@ pub fn click_left(
         // Swallowed / played / missing game: always consume so the underlying
         // moss block is never actually broken.
         _ => {
-            record_game_end(id, Some(player), false);
+            record_game_end(id, false);
             true
         }
     }
@@ -499,7 +526,7 @@ pub fn click_left(
 /// Persist a finished (or, when `allow_unfinished`, abandoned) game exactly
 /// once. Retries on later clicks until the write succeeds, so a transient DB
 /// failure loses nothing (the `recorded` flag only flips on success).
-fn record_game_end(id: u32, clicker: Option<&Player>, allow_unfinished: bool) {
+fn record_game_end(id: u32, allow_unfinished: bool) {
     let snap = state::with_game(id, |g| {
         let origin = g.origin();
         (
@@ -510,6 +537,7 @@ fn record_game_end(id: u32, clicker: Option<&Player>, allow_unfinished: bool) {
             g.is_over,
             g.is_won,
             g.owner,
+            g.owner_name.clone(),
             g.helpers.clone(),
             g.recorded,
             g.locked,
@@ -533,6 +561,7 @@ fn record_game_end(id: u32, clicker: Option<&Player>, allow_unfinished: bool) {
         over,
         won,
         owner,
+        owner_name,
         helpers,
         recorded,
         locked,
@@ -563,14 +592,11 @@ fn record_game_end(id: u32, clicker: Option<&Player>, allow_unfinished: bool) {
     } else {
         return;
     };
-    // The owner's name is only guaranteed when the owner is the finisher;
-    // otherwise the roster row written on join is authoritative.
-    let owner_name = clicker
-        .filter(|p| helpers::uuid_key(p) == owner)
-        .map(|p| p.get_name());
+    // Boards outlive disconnects, so the cached owner name is authoritative
+    // (the finisher may be a helper, and the owner may be offline).
     let record = crate::db::GameRecord {
         owner,
-        owner_name: owner_name.as_deref(),
+        owner_name: Some(owner_name.as_str()),
         helpers: &helpers,
         kind: match kind {
             GameKind::TwoD => crate::db::KIND_2D,
@@ -594,11 +620,6 @@ fn record_game_end(id: u32, clicker: Option<&Player>, allow_unfinished: bool) {
     if crate::db::record_game(&record) {
         state::with_game_mut(id, |g| g.recorded = true);
     }
-}
-
-/// Record an unfinished game before removing it (`/ms clear`, leave).
-pub fn record_abandoned(id: u32, owner: &Player) {
-    record_game_end(id, Some(owner), true);
 }
 
 enum Outcome {
@@ -797,6 +818,7 @@ mod tests {
                 mk(CellContent::Number(2), CellState::Opened, 3),
             ],
             owner,
+            owner_name: "owner".to_string(),
             helpers: Vec::new(),
             locked,
             recorded: false,
@@ -879,6 +901,7 @@ mod tests {
             dim: 4,
             board: board2,
             owner: (1, 1),
+            owner_name: "owner".to_string(),
             helpers: Vec::new(),
             locked: false,
             recorded: false,
@@ -909,6 +932,7 @@ mod tests {
             dim: 3,
             board: board3,
             owner: (1, 1),
+            owner_name: "owner".to_string(),
             helpers: Vec::new(),
             locked: false,
             recorded: false,

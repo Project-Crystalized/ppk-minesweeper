@@ -142,7 +142,12 @@ fn hint_lines() -> Vec<String> {
 
 fn game_lines(id: u32, mine_count: usize) -> Option<Vec<String>> {
     state::with_game(id, |g| {
-        let mut title = format!("§e{} §8#{}", spec_label(g.kind, g.dim), id);
+        let mut title = format!(
+            "§e{} §8#{} §7by §f{}",
+            spec_label(g.kind, g.dim),
+            id,
+            g.owner_name
+        );
         if g.locked {
             title.push_str(" §7[locked]");
         }

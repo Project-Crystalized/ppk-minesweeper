@@ -34,6 +34,9 @@ pub struct GameInstance {
     pub dim: usize,
     pub board: Vec<Cell>,
     pub owner: UuidKey,
+    /// Cached owner display name: boards outlive disconnects, so the
+    /// scoreboard and DB records cannot rely on the owner being online.
+    pub owner_name: String,
     /// Helpers who opened cells (for credit); unlike the owner they do NOT
     /// bypass `locked`.
     pub helpers: Vec<UuidKey>,
@@ -164,6 +167,15 @@ pub fn take_playtime_ticks(owner: UuidKey) -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether a player is currently online (used to pause their game timers
+/// while they are disconnected; boards themselves stay alive).
+pub fn is_online(owner: UuidKey) -> bool {
+    join_ticks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&owner)
+}
+
 /// Ticks a flag toggle stays locked (anti spam-hold). The old Valence game
 /// used an equivalent `flag_lock`.
 pub const FLAG_LOCK_TICKS: u64 = 6;
@@ -266,6 +278,17 @@ pub fn player_games(owner: UuidKey) -> Vec<u32> {
         .collect()
 }
 
+/// Refresh the cached display name on every board owned by `owner`
+/// (called on join, so renames show up on scoreboards and later records).
+pub fn update_owner_name(owner: UuidKey, name: &str) {
+    for game in lock().games.values_mut() {
+        if game.owner == owner {
+            game.owner_name.clear();
+            game.owner_name.push_str(name);
+        }
+    }
+}
+
 /// Remove a game, returning it so the caller can clear its blocks.
 pub fn remove_game(id: u32) -> Option<GameInstance> {
     let mut s = lock();
@@ -310,6 +333,7 @@ pub fn all_games_snapshot() -> Vec<(u32, UuidKey, String, u64, usize, usize, boo
 pub struct GameSummary {
     pub id: u32,
     pub owner: UuidKey,
+    pub owner_name: String,
     pub world_id: String,
     pub kind: GameKind,
     pub dim: usize,
@@ -330,6 +354,7 @@ pub fn all_games_detailed() -> Vec<GameSummary> {
         .map(|(id, g)| GameSummary {
             id: *id,
             owner: g.owner,
+            owner_name: g.owner_name.clone(),
             world_id: g.world_id.clone(),
             kind: g.kind,
             dim: g.dim,
@@ -504,6 +529,7 @@ mod tests {
             dim: 2,
             board: cells,
             owner,
+            owner_name: "owner".to_string(),
             helpers: Vec::new(),
             locked,
             recorded: false,
@@ -528,6 +554,32 @@ mod tests {
         // Removal unindexes every cell: no ghost clicks afterwards.
         remove_game(id);
         assert_eq!(game_id_at(50_001, 100, 9001), None);
+    }
+
+    #[test]
+    fn owner_name_refreshes_on_rename() {
+        let owner = (0xAAA1_0006, 0xBBB1_0006);
+        let id = insert_game(mk_game(owner, 50_101, false));
+        assert_eq!(
+            with_game(id, |g| g.owner_name.clone()).unwrap(),
+            "owner"
+        );
+        update_owner_name(owner, "renamed");
+        assert_eq!(
+            with_game(id, |g| g.owner_name.clone()).unwrap(),
+            "renamed"
+        );
+        remove_game(id);
+    }
+
+    #[test]
+    fn online_tracking_marks_and_clears() {
+        let owner = (0xAAA1_0007, 0xBBB1_0007);
+        assert!(!is_online(owner));
+        mark_join(owner);
+        assert!(is_online(owner));
+        let _ = take_playtime_ticks(owner);
+        assert!(!is_online(owner));
     }
 
     #[test]

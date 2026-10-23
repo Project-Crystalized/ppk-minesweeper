@@ -11,28 +11,30 @@ inside Pumpkin instead of as its own server.
 | `/ms help` | Show help |
 | `/ms 2d <size>` | Start a flat board with custom dimension (2+) |
 | `/ms 3d <size>` | Start a 3D cube with custom dimension (2+) |
-| `/ms lock [id]` | Lock/unlock your games (or right-click the horse-armor item) |
-| `/ms flag` | Cycle flag wool color (or right-click the wool item) |
-| `/ms clear` | Remove all your games (blocks cleared in their own worlds) |
+| `/ms clear` | Remove all your games (unfinished ones logged as abandoned, blocks cleared) |
+| `/ms clearnearest` | Admin: clear the closest board in your world |
 | `/ms list` | List your games (kind, dim, locks, helpers) |
-| `/ms kit` | Re-give starter sticks + lock/flag items |
 | `/ms stats` | Per-size record (games, wins, best/avg) + co-op + infinite totals |
 | `/ms top` | Fastest wins + best infinite streaks (from SQLite) |
 | `/ms infinite` | Teleport to the endless `ms_infinite` world |
 
 Left-click opens a cell, right-click toggles a flag with your own color.
 Flagged/open cells ignore left-clicks (flagged bombs can't explode).
-Locked games only respond to their owner; clicking your own
-finished board clears it. Max 3 active games per player. A per-second action bar
-shows the nearest board with time / bombs / flags. Infinite mode tracks
-streaks with color tiers and 500/1000 broadcasts.
+Lock and flag color are controlled by right-clicking the horse-armor and
+wool items from your starter kit. Locked games only respond to their owner;
+clicking your own finished board clears it. Boards survive disconnects: the
+owner keeps their progress and helpers can continue unlocked games, while the
+owner's timer is paused until they return. Max 3 active games per player. A
+per-second sidebar shows the nearest board, its owner, time, bombs and flags.
+Infinite mode tracks streaks with color tiers and 500/1000 broadcasts.
 
 ## Persistence (SQLite)
 
-Finished sized games (win, loss or abandoned) and infinite-mode lifetime totals
-are recorded in a single SQLite file, following the `LsDatabase` conventions
-(one file, `CREATE TABLE IF NOT EXISTS`, fail-soft: a broken DB disables
-recording, the game keeps running):
+Finished sized games (win or loss) and explicitly abandoned boards
+(`/ms clear`) plus infinite-mode lifetime totals are recorded in a single
+SQLite file, following the `LsDatabase` conventions (one file,
+`CREATE TABLE IF NOT EXISTS`, fail-soft: a broken DB disables recording, the
+game keeps running):
 
 - `MsPlayers`: identity row per player (UUID, current name, a short name
   history, first/last seen, lifetime online playtime in ticks). Names on
@@ -122,6 +124,8 @@ permission (unless blocked in server config, the manifest request applies).
 - [ ] `/ms 2d20` builds a moss board above the player and reports coords
 - [ ] Left-click opens / flood-fills; first click never a bomb
 - [ ] Right-click flags/unflags; win and bomb-reveal paths work
+- [ ] Disconnecting with active boards keeps them; the sidebar shows their owner
+  and the owner's timer pauses while offline
 - [ ] `/ms infinite` creates/teleports to `ms_infinite` with moss terrain
 - [ ] Finished games show up in `data/minesweeper.sql` (`sqlite3` CLI);
   `/ms stats` + `/ms top` read them back; infinite totals survive restart

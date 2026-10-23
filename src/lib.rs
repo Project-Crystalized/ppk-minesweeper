@@ -102,16 +102,7 @@ impl Plugin for MinesweeperPlugin {
             ))
             .then(CommandNode::literal("clear").execute(commands::ClearCommand))
             .then(CommandNode::literal("list").execute(commands::ListCommand))
-            .then(CommandNode::literal("kit").execute(commands::KitCommand))
-            .then(
-                CommandNode::literal("lock")
-                    .then(
-                        CommandNode::argument("id", &ArgumentType::Integer((None, None)))
-                            .execute(commands::LockCommand),
-                    )
-                    .execute(commands::LockCommand),
-            )
-            .then(CommandNode::literal("flag").execute(commands::FlagCommand))
+            .then(CommandNode::literal("clearnearest").execute(commands::ClearNearestCommand))
             .then(CommandNode::literal("stats").execute(commands::StatsCommand))
             .then(CommandNode::literal("top").execute(commands::TopCommand))
             .then(CommandNode::literal("infinite").execute(commands::InfiniteCommand))
