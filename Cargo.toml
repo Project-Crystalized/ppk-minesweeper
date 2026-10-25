@@ -5,7 +5,9 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
-pumpkin-plugin-api = "0.2.0"
+# Pin to the Pumpkin release the server binary is running so the plugin ABI
+# (v0.1 WIT) matches; bump together with the server version.
+pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin", tag = "0.2.1+26.3-26.51" }
 tracing = "0.1.44"
 rusqlite = { version = "0.37", features = ["bundled"] }
 
