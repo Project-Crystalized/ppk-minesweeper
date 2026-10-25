@@ -1,11 +1,6 @@
-//! In-world leaderboards: one big multi-line text display entity per board
-//! at hardcoded spots, refreshed from SQLite. Stateless by design: each
-//! board is tagged with a custom name. On the first refresh after load
-//! every text display within a radius of the board's spot is wiped
-//! (leftovers, legacy boards, stacks — tags may not survive restarts) and a
-//! fresh display is spawned; later refreshes only re-style/re-text the
-//! tagged keeper. That heals server restarts without leaving ghosts,
-//! mirroring how the old server rebuilt its armor-stand boards on a timer.
+//! In-world leaderboards: one multi-line text display per hardcoded spot,
+//! refreshed from SQLite. Displays are tagged; the first refresh after load
+//! wipes the area and respawns fresh, later refreshes reuse the tagged keeper.
 
 use std::{
     collections::HashSet,
@@ -29,12 +24,9 @@ pub const REFRESH_TICKS: u64 = 1200;
 struct Board {
     tag: &'static str,
     title: &'static str,
-    /// `db::KIND_2D` / `db::KIND_3D` (the board's dimensionality).
     game_kind: i64,
     dim: usize,
-    /// What the lines rank: fastest win times or most games finished.
     kind: BoardKind,
-    /// Fixed text orientation (see `Facing`).
     facing: Facing,
     x: f64,
     y: f64,
@@ -59,20 +51,15 @@ impl Facing {
     /// Left-rotation quaternion for the display transformation.
     fn quaternion(self) -> (f32, f32, f32, f32) {
         match self {
-            // Identity: the default plane already faces south.
             Facing::South => (0.0, 0.0, 0.0, 1.0),
-            // 180° about Y.
             Facing::North => (0.0, 1.0, 0.0, 0.0),
         }
     }
 }
 
-/// Hardcoded boards in the spawn plaza: two rows of three spots each
-/// (x spacing 13), south wall at z=1024 facing south and north wall at
-/// z=1079 facing north. Four boards fill four of the six spots; the x=1117
-/// spots on both walls are reserved for future boards.
-/// Line 0 is the header at the TOP; entries stack downward from it.
-/// Edit the numbers to move a board.
+/// Two rows of three spots in the spawn plaza: south wall at z=1024 (facing
+/// south), north wall at z=1079 (facing north). Four boards fill four spots;
+/// the x=1117 spots are reserved. Edit the numbers to move a board.
 const BOARDS: [Board; 4] = [
     Board {
         tag: "ms_lb_2d50",
@@ -153,9 +140,8 @@ fn board_world(server: &Server) -> Option<World> {
     None
 }
 
-/// Rendered text block for one board: gold header + top 10 lines,
-/// newline-separated into a single display. Placeholder lines fill the
-/// empty tail so the board keeps its size before anyone plays.
+/// Rendered text block for one board: gold header plus top 10 lines, with
+/// placeholders filling the tail so the display keeps its size.
 fn board_text(board: &Board) -> String {
     let mut lines = vec![format!("§6§l{}", board.title)];
     match board.kind {
@@ -183,10 +169,8 @@ fn board_text(board: &Board) -> String {
     lines.join("\n")
 }
 
-/// First-refresh trackers: on the very first refresh after load each board
-/// ignores its existing displays and spawns completely fresh ones. This
-/// self-heals any stale metadata (invisible-text corruption from older
-/// sessions) every restart.
+/// First-refresh trackers: the first refresh after load spawns each board
+/// completely fresh, healing stale metadata (invisible-text corruption).
 fn fresh_cycle() -> &'static Mutex<HashSet<&'static str>> {
     static FRESH: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     FRESH.get_or_init(|| Mutex::new(HashSet::new()))
@@ -194,17 +178,13 @@ fn fresh_cycle() -> &'static Mutex<HashSet<&'static str>> {
 
 fn style_new_display(display: &TextDisplayEntity, facing: Facing) {
     display.set_alignment(TextAlignment::Center);
-    // Fixed orientation: the board never rotates to face the player.
     display.get_display().set_billboard(BillboardMode::Fixed);
-    // Orientation flip on top of the display's default (south) plane.
     let (x, y, z, w) = facing.quaternion();
     display.get_display().set_transformation(
         TransformationBuilder::new().left_rotation(x, y, z, w).build(),
     );
-    // Full-light override: the sampled light at the display's own position
-    // can be near zero (e.g. indoor/covered spots), rendering the text dark.
-    // Vanilla packs block/sky light as two 4-bit nibbles; 255 sets both to
-    // 15 regardless of nibble order.
+    // Full-light override: the sampled light can be near zero (covered spots),
+    // so set both light nibbles to 15.
     display.get_display().set_brightness(255);
 }
 
@@ -217,9 +197,7 @@ fn dist2(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
     (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)
 }
 
-/// Remove tagged displays left behind at a board's old spot. The keeper
-/// lookup below matches by tag anywhere in the loaded world, so without
-/// this an old copy could win the lookup after the plaza moves.
+/// Remove tagged displays left behind at a board's old spot.
 fn purge_offsite_tagged(world: &World, tag: &str, pos: (f64, f64, f64)) {
     for entity in world.get_entities() {
         if entity
@@ -266,7 +244,6 @@ fn board_tags() -> Vec<&'static str> {
     BOARDS.iter().map(|b| b.tag).collect()
 }
 
-/// Reconcile one board: exactly one tagged display must exist at our coords.
 fn refresh_board(world: &World, board: &Board) {
     let pos = (board.x, board.y, board.z);
     let text = board_text(board);
@@ -276,18 +253,12 @@ fn refresh_board(world: &World, board: &Board) {
         .unwrap_or_else(|e| e.into_inner())
         .insert(board.tag);
     if forced_fresh {
-        // Boot: wipe every text display near the spot (leftovers, legacy
-        // boards, stacks — tags may not survive restarts) and spawn fresh.
         wipe_area(world, pos, &[]);
         spawn_board_display(world, board, pos, &text);
         return;
     }
-    // Live refresh: tag-only matching — spawns always carry the tag, so
-    // keeper identification is by name alone. Then a stray wipe: leftovers
-    // that surfaced with a late chunk load (entities persist inside chunk
-    // saves, so they're invisible until their chunk streams in) get removed
-    // here, while every tagged keeper — ours and the other boards' — is
-    // protected by name.
+    // Remove strays that surfaced with a late chunk load, then reuse the
+    // tagged keeper.
     wipe_area(world, pos, &board_tags());
     let mut keeper = None;
     for entity in world.get_entities() {
@@ -299,12 +270,10 @@ fn refresh_board(world: &World, board: &Board) {
     match keeper {
         Some(entity) => {
             if let Some(display) = TextDisplayEntity::from_entity(&entity) {
-                // Re-style every refresh so orientation changes converge.
                 style_new_display(&display, board.facing);
                 display.set_text(TextComponent::from_legacy_string(&text));
             } else {
-                // Tagged entity is not a text display (foreign tag
-                // collision): drop it and respawn.
+                // Foreign tag collision: drop it and respawn.
                 entity.remove();
                 spawn_board_display(world, board, pos, &text);
             }
@@ -327,7 +296,6 @@ fn spawn_board_display(world: &World, board: &Board, pos: (f64, f64, f64), text:
     }
 }
 
-/// Refresh all boards. Idempotent and fail-soft (missing world/DB just logs).
 pub fn refresh(server: &Server) {
     let Some(world) = board_world(server) else {
         return;

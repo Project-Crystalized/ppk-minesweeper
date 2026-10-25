@@ -38,8 +38,7 @@ fn tick(server: Server) {
     }
     state::prune_flag_locks(now);
 
-    // Leaderboards refresh on their own slow cadence (plus once shortly
-    // after load so boards appear without waiting a full cycle).
+    // Leaderboard cadence, plus once shortly after load.
     if now == 40 || now % crate::leaderboard::REFRESH_TICKS == 0 {
         crate::leaderboard::refresh(&server);
     }
@@ -61,9 +60,7 @@ fn tick(server: Server) {
                 crate::infinite::persist_session_for(key, &player);
             }
         }
-        // Show the nearest board (any owner), like the old server's
-        // `show_action_bar` which picked the closest `ActionState.center`.
-        // Falls back to the player's own first game when worlds differ.
+        // Action bar: nearest board, else the player's own first game.
         let (px, py, pz) = player.get_position();
         let mut best: Option<(f64, u32)> = None;
         let mut mine_first: Option<u32> = None;

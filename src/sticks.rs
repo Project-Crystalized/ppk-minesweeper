@@ -1,5 +1,4 @@
-//! Starter sticks: named sticks that start games on right-click,
-//! mirroring the old Valence `StartItemType` items.
+//! Starter sticks: named sticks that start games on right-click.
 
 use pumpkin_plugin_api::{
     common::Hand, text::TextComponent, ItemStack, ItemStackExt, Player,
@@ -7,7 +6,6 @@ use pumpkin_plugin_api::{
 
 use crate::games::NewGameSpec;
 
-/// (display name, game) pairs. Names match the old Valence items.
 const STARTERS: [(&str, NewGameSpec); 5] = [
     ("Minesweeper20x20", NewGameSpec::TWO_D_20),
     ("Minesweeper30x30", NewGameSpec::TWO_D_30),
@@ -16,10 +14,8 @@ const STARTERS: [(&str, NewGameSpec); 5] = [
     ("Minesweeper3d7x7", NewGameSpec::THREE_D_7),
 ];
 
-/// Lock-item names, shown by the horse-armor stack in the hotbar.
 pub const LOCKED_NAME: &str = "Game is Locked";
 pub const UNLOCKED_NAME: &str = "Game is Unlocked";
-/// Flag-switcher name, shown by the wool stack in the hotbar.
 pub const FLAG_SWITCH_NAME: &str = "Switch flag color";
 
 pub enum HeldSpecial {
@@ -33,7 +29,6 @@ pub fn make_stick(name: &str) -> ItemStack {
     stack
 }
 
-/// Which game (if any) the held stack starts.
 pub fn starter_for(stack: &ItemStack) -> Option<NewGameSpec> {
     if !stack.matches_item("stick") {
         return None;
@@ -45,7 +40,6 @@ pub fn starter_for(stack: &ItemStack) -> Option<NewGameSpec> {
         .map(|(_, spec)| *spec)
 }
 
-/// Lock/flag utility held in either hand (checked after starters).
 pub fn special_for(stack: &ItemStack) -> Option<HeldSpecial> {
     let text = stack.get_custom_name()?.get_text();
     if text == LOCKED_NAME || text == UNLOCKED_NAME {
@@ -57,7 +51,6 @@ pub fn special_for(stack: &ItemStack) -> Option<HeldSpecial> {
     None
 }
 
-/// Utility item (lock toggle or flag cycle) held in either hand.
 pub fn held_special(player: &Player) -> Option<HeldSpecial> {
     for hand in [Hand::Right, Hand::Left] {
         if let Some(stack) = player.get_item_in_hand(hand) {
@@ -87,14 +80,12 @@ pub fn make_lock_item(locked: bool) -> ItemStack {
 }
 
 pub fn make_flag_item(flag_block: &str) -> ItemStack {
-    // Wool block item matching the flag color (e.g. "minecraft:red_wool").
     let item_name = flag_block.rsplit(':').next().unwrap_or("red_wool");
     let stack = ItemStack::of(item_name, 1);
     stack.set_custom_name(Some(TextComponent::text(FLAG_SWITCH_NAME)));
     stack
 }
 
-/// Starter held in either hand, main hand first.
 pub fn held_starter(player: &Player) -> Option<NewGameSpec> {
     for hand in [Hand::Right, Hand::Left] {
         if let Some(stack) = player.get_item_in_hand(hand) {
@@ -116,7 +107,6 @@ pub fn held_starter(player: &Player) -> Option<NewGameSpec> {
 /// hotbar slots 0-8 safe to write directly (older hosts used the raw index
 /// as a window slot and needed the main-grid workaround).
 pub const OFFHAND_SLOT: u8 = 40;
-/// Utility slots within the hotbar: lock toggle, then flag color.
 const LOCK_SLOT: u8 = 7;
 const FLAG_SLOT: u8 = 8;
 
@@ -142,13 +132,8 @@ fn kit_layout(player: &Player) -> [(u8, ItemStack); 7] {
     ]
 }
 
-/// Join flow: wipe everything (main, armor, offhand) so no stale kit pieces
-/// survive anywhere, then lay out the full 7-piece kit in the hotbar.
-/// Equipment slots are cleared explicitly on top of `clear_all` so a host
-/// that ever changes `clear_all` semantics can't leave ghosts behind.
-/// Slots 41+ are never touched: the server stores nothing there while the
-/// client would still render an item (ghost duplicates). The offhand is
-/// deliberately left empty.
+/// Wipe main/armor/offhand, then lay out the 7-piece hotbar kit. Slots 41+
+/// are never touched (the client would render ghost duplicates there).
 pub fn give_fresh_kit(player: &Player) -> usize {
     player.get_inventory().clear_all();
     for slot in 0..=OFFHAND_SLOT {
@@ -162,9 +147,7 @@ pub fn give_fresh_kit(player: &Player) -> usize {
     given
 }
 
-/// Refresh the lock item name(s) to the player's current aggregate lock
-/// state and the flag item to the current flag color. Scans every storage
-/// slot so hotbar utilities are updated in place.
+/// Update the hotbar utility item names to the current lock state/flag color.
 pub fn refresh_utility_items(player: &Player) {
     use crate::helpers::uuid_key;
     let key = uuid_key(player);

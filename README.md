@@ -43,7 +43,7 @@ game keeps running):
 - `MsGames`: one row per finished or abandoned game: `kind` (0 = 2D,
   1 = 3D), `dim`, final board `seed`, `time_ticks`, `outcome`
   (0 = loss, 1 = win, 2 = abandoned), bombs, flags, flags placed, cells
-  opened, left-clicks, first-click reshuffles, helper count, locked flag,
+  opened, left-clicks, helper count, locked flag,
   epoch end time and board origin `x/y/z`. The world a game was played in is
   deliberately not stored.
 - `MsGamePlayers`: game roster (`is_owner` 1/0), which powers co-op credit.

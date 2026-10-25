@@ -78,7 +78,6 @@ fn generator_id() -> Option<u32> {
     generator_slot().get().copied()
 }
 
-/// Resolve block ids and register the chunk generator. Idempotent.
 pub fn register_generator() {
     static DONE: OnceLock<()> = OnceLock::new();
     DONE.get_or_init(|| {
@@ -89,7 +88,6 @@ pub fn register_generator() {
     });
 }
 
-/// Fetch or create the infinite world and attach our generator.
 pub fn ensure_world(server: &Server) -> World {
     let world = match server.get_world_by_name(INFINITE_WORLD_NAME) {
         Some(w) => w,
@@ -133,12 +131,9 @@ fn content_at(x: i32, z: i32) -> CellContent {
 
 pub fn teleport_here(player: &Player, server: &Server) {
     let world = ensure_world(server);
-    // Land on top of whatever is actually there (fresh flat worlds and
-    // pre-existing terrain both work).
     let top = world.get_top_block_y(8, 8);
     let ty = (top + 1).max(BOARD_Y + 1);
     tracing::info!("infinite: teleport to 8.5, {ty}, 8.5 (top={top})");
-    // Make sure the arrival pad exists if the board plane is exposed.
     let pad = Pos3::new(8, BOARD_Y, 8);
     if is_air(&world, pad) {
         set_block(&world, pad, COVERED_BLOCK);
@@ -239,7 +234,7 @@ pub fn handle_break(
             });
             persist_session(key, player);
             overlay(player, key);
-            // Milestone broadcasts mirror the old server (500 / 1000 streaks).
+            // Broadcast at 500 / 1000 streaks.
             if milestone == 500 || milestone == 1000 {
                 let name = player.get_name();
                 for p in server.get_all_players() {
@@ -254,9 +249,7 @@ pub fn handle_break(
     }
 }
 
-/// Write-through lifetime totals (one row per player). Fail-soft. Only the
-/// durable numbers go out (best/opened/bombs/playtime); the live streak
-/// restarts at 0 after every login (see hydrate_session).
+/// Persist durable infinite totals (fail-soft).
 fn persist_session(key: crate::state::UuidKey, player: &Player) {
     let (top, opened, bombs, playtime) = state::with_session_mut(key, |s| {
         (
@@ -269,9 +262,7 @@ fn persist_session(key: crate::state::UuidKey, player: &Player) {
     crate::db::save_infinite(key, Some(&player.get_name()), top, opened, bombs, playtime);
 }
 
-/// Persist a player's lifetime infinite totals (leave + periodic flush).
-/// Players who never entered the infinite world have no session and are not
-/// given a zero row.
+/// Persist totals for players who entered the infinite world.
 pub fn persist_session_for(key: crate::state::UuidKey, player: &Player) {
     if state::session(key).is_some() {
         persist_session(key, player);
@@ -371,8 +362,7 @@ mod tests {
 fn overlay(player: &Player, key: crate::state::UuidKey) {
     use pumpkin_plugin_api::text::TextComponent;
     state::with_session_mut(key, |s| {
-        // Color tiers mirror the old server (gray -> green -> blue ->
-        // dark-blue -> red -> dark-red -> gold), obfuscated past 1000.
+        // Streak colors, obfuscated past 1000.
         let code = match s.current_streak {
             0..=50 => "§7",
             51..=150 => "§a",

@@ -193,7 +193,6 @@ impl CommandHandler for ClearNearestCommand {
 
 pub struct StatsCommand;
 
-/// Board label with the right dimensionality ("2D 30x30", "3D 5x5x5").
 fn spec_label(kind: i64, dim: usize) -> String {
     if kind == crate::db::KIND_3D {
         format!("3D {dim}x{dim}x{dim}")
@@ -202,7 +201,6 @@ fn spec_label(kind: i64, dim: usize) -> String {
     }
 }
 
-/// Compact lifetime duration ("2h 5m", "12m", "45s") from ticks (20/s).
 fn fmt_duration(ticks: u64) -> String {
     let secs = ticks / 20;
     let hours = secs / 3600;

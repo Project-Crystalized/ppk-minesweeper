@@ -74,20 +74,22 @@ pub struct Cell {
     pub pos: Pos3,
 }
 
-// ---------------------------------------------------------------------------
-// 2D boards
-// ---------------------------------------------------------------------------
-
 pub fn bomb_amount_2d(dim: usize) -> usize {
     dim.pow(2).div_euclid(6).max(1)
 }
 
-pub fn generate_board_2d(dim: usize, bomb_amt: usize, origin: Pos3, rng: &mut TinyRng) -> Vec<Cell> {
-    generate_board_2d_avoiding(dim, bomb_amt, origin, rng, &[])
+/// Blank board: real cell positions, no bombs/numbers until the first dig.
+pub fn blank_board_2d(dim: usize, origin: Pos3) -> Vec<Cell> {
+    (0..dim * dim)
+        .map(|idx| Cell {
+            pos: origin.offset((idx % dim) as i32, 0, (idx / dim) as i32),
+            ..Cell::default()
+        })
+        .collect()
 }
 
-/// Like [`generate_board_2d`], but the cell at `safe` and its neighbours can
-/// never hold a bomb, so a first click there is guaranteed to be `Empty`.
+/// A full random board, except the cell at `safe` and its neighbours can never
+/// hold a bomb, so a first click there is guaranteed to be `Empty`.
 /// Tiny boards (2x2) have no zero-cell at all; there the bomb count wins and
 /// the guarantee degrades to "never a bomb".
 pub fn generate_board_2d_safe(
@@ -111,12 +113,11 @@ fn generate_board_2d_avoiding(
     rng: &mut TinyRng,
     avoid: &[usize],
 ) -> Vec<Cell> {
-    let mut board = vec![Cell::default(); dim * dim];
+    let mut board = blank_board_2d(dim, origin);
     place_bombs_exact(&mut board, bomb_amt, rng, avoid);
     for y in 0..dim {
         for x in 0..dim {
             let idx = y * dim + x;
-            board[idx].pos = origin.offset(x as i32, 0, y as i32);
             if board[idx].content == CellContent::Bomb {
                 continue;
             }
@@ -129,8 +130,7 @@ fn generate_board_2d_avoiding(
     board
 }
 
-/// Cells that must stay bomb-free for a safe first click: the cell itself
-/// plus every neighbour.
+/// Cells that must stay bomb-free for a safe first click (self + neighbours).
 fn avoid_for_2d(dim: usize, safe: usize) -> Vec<usize> {
     let (sx, sy) = (safe % dim, safe / dim);
     let mut avoid = vec![safe];
@@ -138,8 +138,7 @@ fn avoid_for_2d(dim: usize, safe: usize) -> Vec<usize> {
     avoid
 }
 
-/// Place exactly `bomb_amt` bombs at distinct random cells (Fisher-Yates),
-/// never on an index in `avoid`.
+/// Place exactly `bomb_amt` bombs (Fisher-Yates), never on an index in `avoid`.
 fn place_bombs_exact(board: &mut [Cell], bomb_amt: usize, rng: &mut TinyRng, avoid: &[usize]) {
     let mut indices: Vec<usize> = (0..board.len()).filter(|i| !avoid.contains(i)).collect();
     let bomb_amt = bomb_amt.min(indices.len());
@@ -188,16 +187,11 @@ pub fn adjacent_2d(dim: usize, x: usize, y: usize) -> Vec<(usize, usize)> {
     out
 }
 
-/// Win check: every non-bomb cell opened.
 pub fn is_won(board: &[Cell]) -> bool {
     board
         .iter()
         .all(|c| c.state == CellState::Opened || c.content == CellContent::Bomb)
 }
-
-// ---------------------------------------------------------------------------
-// 3D boards
-// ---------------------------------------------------------------------------
 
 pub fn bomb_amount_3d(dim: usize) -> usize {
     dim.pow(3).div_euclid(8).max(1)
@@ -227,17 +221,20 @@ pub fn count_bombs_3d(board: &[Cell], dim: usize, x: usize, y: usize, z: usize) 
     n
 }
 
-pub fn generate_board_3d(
-    dim: usize,
-    bomb_amt: usize,
-    origin: Pos3,
-    rng: &mut TinyRng,
-) -> Vec<Cell> {
-    generate_board_3d_avoiding(dim, bomb_amt, origin, rng, &[])
+pub fn blank_board_3d(dim: usize, origin: Pos3) -> Vec<Cell> {
+    (0..dim * dim * dim)
+        .map(|idx| {
+            let (x, y, z) = (idx % dim, (idx / dim) % dim, idx / (dim * dim));
+            Cell {
+                pos: origin.offset(x as i32 * 3, z as i32 * 3, y as i32 * 3),
+                ..Cell::default()
+            }
+        })
+        .collect()
 }
 
-/// Like [`generate_board_3d`], but the cell at `safe` and its 26 neighbours
-/// can never hold a bomb, so a first click there is guaranteed to be `Empty`.
+/// A full random board, except the cell at `safe` and its 26 neighbours can
+/// never hold a bomb, so a first click there is guaranteed to be `Empty`.
 /// 2x2x2 has no zero-cell at all; there the bomb count wins and the guarantee
 /// degrades to "never a bomb".
 pub fn generate_board_3d_safe(
@@ -261,14 +258,12 @@ fn generate_board_3d_avoiding(
     rng: &mut TinyRng,
     avoid: &[usize],
 ) -> Vec<Cell> {
-    let mut board = vec![Cell::default(); dim * dim * dim];
+    let mut board = blank_board_3d(dim, origin);
     place_bombs_exact(&mut board, bomb_amt, rng, avoid);
     for z in 0..dim {
         for y in 0..dim {
             for x in 0..dim {
                 let idx = (z * dim + y) * dim + x;
-                // Same 3-block spacing as the old 3D mode.
-                board[idx].pos = origin.offset(x as i32 * 3, z as i32 * 3, y as i32 * 3);
                 if board[idx].content == CellContent::Bomb {
                     continue;
                 }
@@ -282,8 +277,6 @@ fn generate_board_3d_avoiding(
     board
 }
 
-/// Cells that must stay bomb-free for a safe first click: the cell itself
-/// plus every neighbour.
 fn avoid_for_3d(dim: usize, safe: usize) -> Vec<usize> {
     let (x, y, z) = (safe % dim, (safe / dim) % dim, safe / (dim * dim));
     let mut avoid = vec![safe];
@@ -316,24 +309,15 @@ pub fn adjacent_3d(dim: usize, x: usize, y: usize, z: usize) -> Vec<(usize, usiz
     out
 }
 
-// ---------------------------------------------------------------------------
-// Block palette (vanilla names for Pumpkin's set_block_by_name)
-// ---------------------------------------------------------------------------
-
 pub const COVERED_BLOCK: &str = "minecraft:moss_block";
-/// Default flag block (player red). Per-player colors live in `state.rs`
-/// (`flag_block_for`); this stays as the fallback/documented default.
+/// Default red flag block (per-player colors: `state::flag_block_for`).
 #[allow(dead_code)]
 pub const FLAG_BLOCK: &str = "minecraft:red_wool";
 pub const AIR_BLOCK: &str = "minecraft:air";
 
-/// Maps revealed content to a vanilla block plus an optional `facing`
-/// property value for Java-RP's minesweeper tile art.
-///
-/// Java-RP retextures cyan/lime/magenta glazed terracotta so every facing
-/// renders a different tile (digits 1..=12). Numbers 13+ fall back to
-/// concrete colors like before (3D boards can reach 26; those digits have
-/// no tile art and are practically unreachable).
+/// Maps revealed content to a vanilla block plus an optional `facing` for
+/// Java-RP's tile art (cyan/lime/magenta terracotta digits 1..=12; higher
+/// numbers fall back to concrete colors).
 pub fn revealed_tile(content: CellContent) -> (&'static str, Option<&'static str>) {
     match content {
         CellContent::Empty => ("minecraft:stone", None),
@@ -369,11 +353,7 @@ pub fn revealed_tile(content: CellContent) -> (&'static str, Option<&'static str
     }
 }
 
-// ---------------------------------------------------------------------------
-// Infinite mode helpers (hash-based, no noise crate)
-// ---------------------------------------------------------------------------
-
-/// Bomb density ~19.5%, matching the old BOMB_THRESHOLD = 0.195.
+/// Bomb density ~19.5%.
 pub fn infinite_is_bomb(x: i32, z: i32, seed: u64) -> bool {
     hash2(x, z, seed) % 1000 < 195
 }
@@ -401,7 +381,13 @@ mod tests {
     fn board_2d_has_exact_bombs_and_positions() {
         let mut rng = TinyRng::new(42);
         let dim = 20;
-        let board = generate_board_2d(dim, bomb_amount_2d(dim), Pos3::new(10, 64, 10), &mut rng);
+        let board = generate_board_2d_avoiding(
+            dim,
+            bomb_amount_2d(dim),
+            Pos3::new(10, 64, 10),
+            &mut rng,
+            &[],
+        );
         assert_eq!(
             board
                 .iter()
@@ -417,7 +403,7 @@ mod tests {
     fn numbers_match_neighbors() {
         let mut rng = TinyRng::new(1);
         let dim = 9;
-        let board = generate_board_2d(dim, 10, Pos3::new(0, 64, 0), &mut rng);
+        let board = generate_board_2d_avoiding(dim, 10, Pos3::new(0, 64, 0), &mut rng, &[]);
         for y in 0..dim {
             for x in 0..dim {
                 let c = &board[y * dim + x];
@@ -434,7 +420,13 @@ mod tests {
     fn board_3d_counts_fit_palette() {
         let mut rng = TinyRng::new(7);
         let dim = 5;
-        let board = generate_board_3d(dim, bomb_amount_3d(dim), Pos3::new(0, 70, 0), &mut rng);
+        let board = generate_board_3d_avoiding(
+            dim,
+            bomb_amount_3d(dim),
+            Pos3::new(0, 70, 0),
+            &mut rng,
+            &[],
+        );
         for c in &board {
             // Must not panic: every content maps to a block (and facing).
             let _ = revealed_tile(c.content);
@@ -452,15 +444,12 @@ mod tests {
 
     #[test]
     fn neighborhoods_exclude_self() {
-        // 2D center: exactly 8 neighbors, never self.
         let center = adjacent_2d(5, 2, 2);
         assert_eq!(center.len(), 8);
         assert!(!center.contains(&(2, 2)));
-        // Corner / edge clipping still holds.
         assert_eq!(adjacent_2d(5, 0, 0).len(), 3);
         assert_eq!(adjacent_2d(5, 1, 0).len(), 5);
         assert_eq!(adjacent_2d(2, 0, 0).len(), 3);
-        // 3D center: exactly 26 neighbors, never self.
         let center3 = adjacent_3d(5, 2, 2, 2);
         assert_eq!(center3.len(), 26);
         assert!(!center3.contains(&(2, 2, 2)));
@@ -469,12 +458,10 @@ mod tests {
 
     #[test]
     fn bomb_counts_exclude_center_cell() {
-        // Lone bomb in a 3x3: orthogonal + diagonal neighbors see 1...
         let mut board = vec![Cell::default(); 9];
         board[1 * 3 + 1].content = CellContent::Bomb;
         assert_eq!(count_bombs_2d(&board, 3, 0, 0), 1);
         assert_eq!(count_bombs_2d(&board, 3, 1, 0), 1);
-        // ...but the bomb cell itself counts 0 neighbors.
         assert_eq!(count_bombs_2d(&board, 3, 1, 1), 0);
 
         let mut board3 = vec![Cell::default(); 27];
@@ -485,11 +472,15 @@ mod tests {
 
     #[test]
     fn generated_numbers_match_neighbor_counts() {
-        // Property over several seeds/sizes: every Number cell equals a fresh
-        // recount, so generation and counting can never drift apart.
         for (seed, dim) in [(11, 4), (12, 6), (13, 9)] {
             let mut rng = TinyRng::new(seed);
-            let board = generate_board_2d(dim, bomb_amount_2d(dim), Pos3::new(0, 64, 0), &mut rng);
+            let board = generate_board_2d_avoiding(
+                dim,
+                bomb_amount_2d(dim),
+                Pos3::new(0, 64, 0),
+                &mut rng,
+                &[],
+            );
             for y in 0..dim {
                 for x in 0..dim {
                     let c = &board[y * dim + x];
@@ -508,7 +499,7 @@ mod tests {
         let mut rng = TinyRng::new(9);
         let dim = 4;
         let origin = Pos3::new(10, 64, -7);
-        let board = generate_board_3d(dim, 5, origin, &mut rng);
+        let board = generate_board_3d_avoiding(dim, 5, origin, &mut rng, &[]);
         assert_eq!(board.len(), dim * dim * dim);
         let mut seen = std::collections::HashSet::new();
         for c in &board {

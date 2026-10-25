@@ -1,19 +1,10 @@
-//! SQLite persistence, following the house `LsDatabase` conventions:
-//! a single SQLite file, `CREATE TABLE IF NOT EXISTS` on startup, one
-//! connection per operation, and fail-soft behavior (a broken DB disables
-//! recording; the game keeps running).
+//! SQLite persistence: one file, `CREATE TABLE IF NOT EXISTS` on startup, one
+//! connection per operation, fail-soft (a broken DB disables recording; the
+//! game keeps running). There is no migration code: reset the file whenever
+//! the schema changes.
 //!
-//! Schema v2 (see `setup_in`): `MsPlayers` identities, `MsGames` per-game
-//! event log, `MsGamePlayers` rosters, lifetime `MsInfiniteStats` totals and
-//! a small per-day `MsDaily` rollup. There is deliberately no migration code:
-//! the file is reset whenever the schema changes.
-//!
-//! Sandbox note: the Pumpkin host only preopens the plugin's own data folder
-//! (needs the `fs.write.data` manifest permission), so the file lives at
-//! `data/minesweeper.sql` inside the sandbox, i.e.
-//! `<server>/plugins/data/<plugin>/minesweeper.sql` on the host.
-//! `~/databases/` is NOT reachable from inside the plugin; to land the file
-//! there, bind-mount that directory over the plugin data folder server-side.
+//! Sandbox: the host only preopens the plugin's `data/` dir, so the file is
+//! `data/minesweeper.sql` (host: `<server>/plugins/data/<plugin>/minesweeper.sql`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
@@ -23,14 +14,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::UuidKey;
 
-/// Guest-side path: resolved against the preopened `data` dir by the host.
 pub const DB_PATH: &str = "data/minesweeper.sql";
 
-/// `MsGames.kind` values (tiny integers, no mode strings).
 pub const KIND_2D: i64 = 0;
 pub const KIND_3D: i64 = 1;
 
-/// `MsGames.outcome` values.
 pub const OUTCOME_LOSS: i64 = 0;
 pub const OUTCOME_WIN: i64 = 1;
 pub const OUTCOME_ABANDONED: i64 = 2;
@@ -49,7 +37,7 @@ fn db_broken(reason: &str) {
     }
 }
 
-/// Open a fresh connection (one per operation, like `LsDatabase`).
+/// Open a fresh connection.
 fn open(path: &str) -> Option<Connection> {
     if !db_ok() {
         return None;
@@ -88,7 +76,7 @@ pub fn uuid_bytes(id: UuidKey) -> [u8; 16] {
     b
 }
 
-/// Inverse of `uuid_bytes`, kept for tests pinning the blob layout.
+/// Inverse of `uuid_bytes` (tests pin the blob layout).
 #[cfg(test)]
 pub fn uuid_from_bytes(b: &[u8]) -> Option<UuidKey> {
     if b.len() != 16 {
@@ -127,7 +115,6 @@ fn setup_in(conn: &Connection) -> rusqlite::Result<()> {
         "flags_placed INTEGER NOT NULL,",
         "opened INTEGER NOT NULL,",
         "clicks INTEGER NOT NULL,",
-        "reshuffles INTEGER NOT NULL,",
         "helpers INTEGER NOT NULL,",
         "locked INTEGER NOT NULL,",
         "ended INTEGER NOT NULL,",
@@ -243,7 +230,6 @@ fn ensure_player_in(
     }
 }
 
-/// Insert or refresh a player identity (called on join and at game end).
 pub fn touch_player(owner: UuidKey, name: &str) {
     let _ = with_conn(|c| ensure_player_in(c, owner, Some(name)));
 }
@@ -262,7 +248,6 @@ pub fn add_playtime(owner: UuidKey, ticks: u64) {
     });
 }
 
-/// One finished or abandoned sized game.
 pub struct GameRecord<'a> {
     pub owner: UuidKey,
     /// Owner name when known (usually only when the owner is the finisher).
@@ -279,7 +264,6 @@ pub struct GameRecord<'a> {
     pub flags_placed: u32,
     pub opened: usize,
     pub clicks: u32,
-    pub reshuffles: u32,
     pub locked: bool,
     pub x: i32,
     pub y: i32,
@@ -310,9 +294,9 @@ fn record_game_in(conn: &Connection, r: &GameRecord<'_>) -> rusqlite::Result<()>
     }
     tx.execute(
         "INSERT INTO MsGames(owner_id, kind, dim, seed, time_ticks, outcome, \
-         bombs, flags, flags_placed, opened, clicks, reshuffles, helpers, \
+         bombs, flags, flags_placed, opened, clicks, helpers, \
          locked, ended, x, y, z) \
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), ?, ?, ?);",
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), ?, ?, ?);",
         params![
             owner_id,
             r.kind,
@@ -325,7 +309,6 @@ fn record_game_in(conn: &Connection, r: &GameRecord<'_>) -> rusqlite::Result<()>
             r.flags_placed as i64,
             r.opened as i64,
             r.clicks as i64,
-            r.reshuffles as i64,
             helper_ids.len() as i64,
             r.locked as i64,
             r.x,
@@ -365,7 +348,6 @@ fn record_game_in(conn: &Connection, r: &GameRecord<'_>) -> rusqlite::Result<()>
     tx.commit()
 }
 
-/// Record a finished/abandoned game plus its roster. Returns success.
 pub fn record_game(record: &GameRecord<'_>) -> bool {
     let ok = with_conn(|c| record_game_in(c, record)).is_some_and(|r| r.is_ok());
     if ok {
@@ -379,7 +361,7 @@ pub fn record_game(record: &GameRecord<'_>) -> bool {
             record.helpers.len(),
         );
     } else {
-        tracing::warn!("database: failed to record game");
+        tracing::error!("database: failed to record game");
     }
     ok
 }
@@ -423,7 +405,6 @@ fn save_infinite_in(
     Ok(())
 }
 
-/// Write-through infinite total snapshot. Cheap (one row) and fail-soft.
 pub fn save_infinite(
     owner: UuidKey,
     name: Option<&str>,
@@ -559,7 +540,6 @@ fn map_top_win(row: &rusqlite::Row<'_>) -> rusqlite::Result<TopWin> {
     })
 }
 
-/// Fastest wins overall, optionally filtered to one kind (`KIND_2D`/`KIND_3D`).
 pub fn top_wins_in(conn: &Connection, kind: Option<i64>, limit: usize) -> Vec<TopWin> {
     let sql = match kind {
         Some(_) => {
@@ -737,7 +717,6 @@ mod tests {
             flags_placed: 4,
             opened: 10,
             clicks: 12,
-            reshuffles: 2,
             locked: false,
             x: 100,
             y: 64,

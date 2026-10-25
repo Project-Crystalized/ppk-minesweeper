@@ -21,9 +21,7 @@ pub struct JoinListener;
 
 impl EventHandler<PlayerJoinEvent> for JoinListener {
     fn handle(&self, _server: Server, event: EventData<PlayerJoinEvent>) -> EventData<PlayerJoinEvent> {
-        // Fresh minigame inventory: wipe first (stale kit pieces could sit in
-        // armor/offhand slots), then put the starter and utility items in the
-        // hotbar. Number keys select them directly.
+        // Fresh kit: wipe stale slots, then lay out the hotbar kit.
         crate::sticks::give_fresh_kit(&event.player);
         crate::state::mark_join(crate::helpers::uuid_key(&event.player));
         crate::db::touch_player(
@@ -94,8 +92,7 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
             return event;
         }
 
-        // Global build protection: no breaking outside minesweeper boards.
-        // (Board clicks are routed above; plugin block writes are unaffected.)
+        // Global build protection: breaking is disabled outside boards.
         event.cancelled = true;
         event.should_drop = false;
         event.exp = 0;
@@ -115,15 +112,13 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
         if !is_right_click {
             return event;
         }
-        // Starter sticks win over flagging (mirrors the old item-use flow).
+        // Starter sticks win over flagging.
         if let Some(spec) = crate::sticks::held_starter(&event.player) {
             crate::games::create_game(&event.player, spec);
             event.cancelled = true;
             return event;
         }
-        // Lock toggle / flag-color cycle items in the hotbar (old slot 43/44
-        // equivalents). They work on air clicks too, like the old
-        // InteractItemEvent flow.
+        // Lock toggle / flag color items also work on air clicks.
         if let Some(special) = crate::sticks::held_special(&event.player) {
             use crate::sticks::HeldSpecial;
             match special {
@@ -169,8 +164,6 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
     }
 }
 
-/// Global build protection: block placement is disabled server-wide.
-/// (Plugin board creation/clearing uses direct world writes, unaffected.)
 pub struct PlaceListener;
 
 impl EventHandler<BlockPlaceEvent> for PlaceListener {
@@ -185,7 +178,6 @@ impl EventHandler<BlockPlaceEvent> for PlaceListener {
     }
 }
 
-/// No mob spawning: natural, spawner, and trial-spawner births are cancelled.
 pub struct NoMobSpawnListener;
 
 impl EventHandler<CreatureSpawnEvent> for NoMobSpawnListener {
@@ -221,8 +213,7 @@ impl EventHandler<TrialSpawnerSpawnEvent> for NoMobSpawnListener {
     }
 }
 
-/// Explosions can't crater minesweeper boards (no creepers spawn anyway,
-/// but lit TNT / beds / anchors could still do damage).
+/// Explosions can't crater boards (TNT, beds, anchors).
 pub struct NoExplodeListener;
 
 impl EventHandler<BlockExplodeEvent> for NoExplodeListener {

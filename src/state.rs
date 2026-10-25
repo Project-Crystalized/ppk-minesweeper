@@ -17,9 +17,7 @@ use crate::core::{Cell, Pos3};
 pub type UuidKey = (u64, u64);
 
 pub const MAX_GAMES_PER_PLAYER: usize = 3;
-/// Vertical bounds for board placement. There is no horizontal limit: unlike
-/// the old server (which had a 250-block world border), Pumpkin worlds are
-/// effectively unbounded, so boards can start wherever the player stands.
+/// Vertical bounds for board placement (worlds are horizontally unbounded).
 pub const MIN_BUILD_Y: i32 = -64;
 pub const MAX_BUILD_Y: i32 = 320;
 
@@ -40,16 +38,13 @@ pub struct GameInstance {
     /// Helpers who opened cells (for credit); unlike the owner they do NOT
     /// bypass `locked`.
     pub helpers: Vec<UuidKey>,
-    /// When true, only the owner may click/flag this game.
     pub locked: bool,
     /// Set once the finished game has been written to SQLite.
     pub recorded: bool,
     pub world_id: String,
     pub comp_time_ticks: u64,
-    /// Seed that produced the current board (updated on first-click reshuffle).
+    /// Seed that produced the board; 0 until the first dig.
     pub seed: u64,
-    /// First-click regenerations applied to this board.
-    pub reshuffles: u32,
     /// Left-clicks routed to this board (including swallowed ones).
     pub clicks: u32,
     /// Times a flag was toggled on (unflags do not count).
@@ -60,11 +55,10 @@ pub struct GameInstance {
 
 impl GameInstance {
     pub fn bomb_total(&self) -> usize {
-        use crate::core::CellContent;
-        self.board
-            .iter()
-            .filter(|c| c.content == CellContent::Bomb)
-            .count()
+        match self.kind {
+            GameKind::TwoD => crate::core::bomb_amount_2d(self.dim),
+            GameKind::ThreeD => crate::core::bomb_amount_3d(self.dim),
+        }
     }
 
     pub fn flag_count(&self) -> usize {
@@ -85,18 +79,15 @@ impl GameInstance {
             .count()
     }
 
-    /// Top-left/first cell position, used as the recorded board origin.
     pub fn origin(&self) -> Pos3 {
         self.board.first().map(|c| c.pos).unwrap_or_default()
     }
 
-    /// Index of the cell at `pos`, if this game owns it.
     pub fn find_cell(&self, pos: Pos3) -> Option<usize> {
         self.board.iter().position(|c| c.pos == pos)
     }
 
-    /// Middle cell of the board, used as the action-bar proximity anchor
-    /// (mirrors the old `ActionState.center`).
+    /// Middle cell, used as the action-bar proximity anchor.
     pub fn center(&self) -> Pos3 {
         self.board
             .get(self.board.len() / 2)
@@ -104,8 +95,7 @@ impl GameInstance {
             .unwrap_or_default()
     }
 
-    /// True when `who` may click/flag: owner always, anyone else only when
-    /// unlocked (helpers do not bypass the lock, same as the old server).
+    /// Owner always; helpers only when the game is unlocked.
     pub fn is_allowed(&self, who: UuidKey) -> bool {
         who == self.owner || !self.locked
     }
@@ -128,7 +118,7 @@ fn state() -> &'static Mutex<State> {
 }
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-/// Seed source for board RNGs (mixed with the player uuid at creation).
+/// Seed source for board RNGs.
 static RNG_SALT: AtomicU64 = AtomicU64::new(0x9E3779B97F4A7C15);
 
 /// Global tick counter, advanced by the 1-tick scheduler task. Used for
@@ -176,8 +166,7 @@ pub fn is_online(owner: UuidKey) -> bool {
         .contains_key(&owner)
 }
 
-/// Ticks a flag toggle stays locked (anti spam-hold). The old Valence game
-/// used an equivalent `flag_lock`.
+/// Ticks a flag toggle stays locked (anti spam-hold).
 pub const FLAG_LOCK_TICKS: u64 = 6;
 
 fn flag_locks() -> &'static Mutex<HashMap<(u32, usize), u64>> {
@@ -242,7 +231,6 @@ fn lock() -> std::sync::MutexGuard<'static, State> {
     state().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Insert a game, indexing all its cells. Returns the new game id.
 pub fn insert_game(game: GameInstance) -> u32 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let mut s = lock();
@@ -299,7 +287,6 @@ pub fn remove_game(id: u32) -> Option<GameInstance> {
     Some(game)
 }
 
-/// Remove all games owned by `owner`, returning them for block cleanup.
 pub fn remove_player_games(owner: UuidKey) -> Vec<GameInstance> {
     let ids: Vec<u32> = lock()
         .games
@@ -328,8 +315,7 @@ pub fn all_games_snapshot() -> Vec<(u32, UuidKey, String, u64, usize, usize, boo
         .collect()
 }
 
-/// Extended snapshot for `/ms list` and the tick action bar: includes kind,
-/// dim, lock state and helper count.
+/// Snapshot for `/ms list` and the tick action bar.
 pub struct GameSummary {
     pub id: u32,
     pub owner: UuidKey,
@@ -370,7 +356,6 @@ pub fn all_games_detailed() -> Vec<GameSummary> {
         .collect()
 }
 
-/// Record `who` as a helper of game `id` (no-op for the owner or dupes).
 #[allow(dead_code)]
 pub fn add_helper(id: u32, who: UuidKey) {
     if let Some(game) = lock().games.get_mut(&id) {
@@ -380,8 +365,6 @@ pub fn add_helper(id: u32, who: UuidKey) {
     }
 }
 
-/// Toggle the lock on one game. Only the owner may do this.
-/// Returns the new state, or `None` if the game is missing / not owned.
 pub fn toggle_lock(id: u32, who: UuidKey) -> Option<bool> {
     let mut s = lock();
     let game = s.games.get_mut(&id)?;
@@ -408,11 +391,6 @@ pub fn toggle_all_locks(who: UuidKey) -> (usize, bool) {
     (owned.len(), target)
 }
 
-// ---------------------------------------------------------------------------
-// Per-player flag color (mirrors old Valence `FlagType`, slot 44 cycling
-// RED -> ORANGE -> YELLOW -> CYAN -> BLUE).
-// ---------------------------------------------------------------------------
-
 /// (wool item/block suffix, full block name) in cycle order.
 pub const FLAG_STYLE_ORDER: [(&str, &str); 5] = [
     ("red", "minecraft:red_wool"),
@@ -438,7 +416,6 @@ pub fn flag_block_for(owner: UuidKey) -> &'static str {
     FLAG_STYLE_ORDER[idx % FLAG_STYLE_ORDER.len()].1
 }
 
-/// Cycle `owner` to the next flag color. Returns the new block name.
 pub fn cycle_flag_style(owner: UuidKey) -> &'static str {
     let mut s = flag_styles().lock().unwrap_or_else(|e| e.into_inner());
     let next = s.get(&owner).copied().unwrap_or(0) + 1;
@@ -456,11 +433,6 @@ pub fn flag_style_name(owner: UuidKey) -> &'static str {
         .unwrap_or(0);
     FLAG_STYLE_ORDER[idx % FLAG_STYLE_ORDER.len()].0
 }
-
-// ---------------------------------------------------------------------------
-// Infinite-mode sessions (live state in memory; lifetime totals persist in
-// `MsInfiniteStats`, see `db.rs`)
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Default)]
 pub struct InfiniteSession {
@@ -536,7 +508,6 @@ mod tests {
             world_id: "test_world".to_string(),
             comp_time_ticks: 0,
             seed: 1,
-            reshuffles: 0,
             clicks: 0,
             flags_placed: 0,
             is_over: false,
@@ -589,7 +560,6 @@ mod tests {
         let id = insert_game(mk_game(owner, 50_011, false));
         assert!(!with_game(id, |g| g.locked).unwrap());
         assert!(with_game(id, |g| g.is_allowed(stranger)).unwrap());
-        // Stranger cannot flip the lock.
         assert_eq!(toggle_lock(id, stranger), None);
         assert_eq!(toggle_lock(id, owner), Some(true));
         assert!(!with_game(id, |g| g.is_allowed(stranger)).unwrap());

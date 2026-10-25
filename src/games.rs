@@ -4,8 +4,8 @@ use pumpkin_plugin_api::{Player, World};
 
 use crate::{
     core::{
-        self, adjacent_2d, adjacent_3d, bomb_amount_2d, bomb_amount_3d, generate_board_2d,
-        generate_board_2d_safe, generate_board_3d, generate_board_3d_safe, is_won, CellContent,
+        self, adjacent_2d, adjacent_3d, blank_board_2d, blank_board_3d, bomb_amount_2d,
+        bomb_amount_3d, generate_board_2d_safe, generate_board_3d_safe, is_won, CellContent,
         CellState, Pos3, TinyRng, AIR_BLOCK, COVERED_BLOCK,
     },
     helpers::{self, is_air, play_sound, set_block, set_tile, tell, Sound},
@@ -62,7 +62,6 @@ impl NewGameSpec {
     }
 }
 
-/// Offsets (relative to the origin cell) of every board cell for `spec`.
 fn cell_offsets(spec: NewGameSpec) -> Vec<(i32, i32, i32)> {
     let dim = spec.dim;
     match spec.kind {
@@ -131,19 +130,11 @@ fn find_origin(world: &World, feet: Pos3, spec: NewGameSpec) -> Option<Pos3> {
     None
 }
 
-fn cells_of(spec: NewGameSpec, origin: Pos3, rng: &mut TinyRng) -> (GameKind, usize, Vec<core::Cell>) {
+fn cells_of(spec: NewGameSpec, origin: Pos3) -> (GameKind, usize, Vec<core::Cell>) {
     let dim = spec.dim;
     match spec.kind {
-        GameKind::TwoD => (
-            GameKind::TwoD,
-            dim,
-            generate_board_2d(dim, bomb_amount_2d(dim), origin, rng),
-        ),
-        GameKind::ThreeD => (
-            GameKind::ThreeD,
-            dim,
-            generate_board_3d(dim, bomb_amount_3d(dim), origin, rng),
-        ),
+        GameKind::TwoD => (GameKind::TwoD, dim, blank_board_2d(dim, origin)),
+        GameKind::ThreeD => (GameKind::ThreeD, dim, blank_board_3d(dim, origin)),
     }
 }
 
@@ -171,9 +162,7 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
         return;
     };
 
-    let seed = state::next_rng_seed(owner);
-    let mut rng = TinyRng::new(seed);
-    let (kind, dim, board) = cells_of(spec, origin, &mut rng);
+    let (kind, dim, board) = cells_of(spec, origin);
 
     let mut bulk = helpers::BulkWriter::new(&world);
     for cell in &board {
@@ -191,8 +180,7 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
         recorded: false,
         world_id,
         comp_time_ticks: 0,
-        seed,
-        reshuffles: 0,
+        seed: 0,
         clicks: 0,
         flags_placed: 0,
         is_over: false,
@@ -223,7 +211,6 @@ pub fn create_game(player: &Player, spec: NewGameSpec) {
 
 pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) {
     let owner = helpers::uuid_key(player);
-    // Record anything still unrecorded before the games disappear.
     for id in state::player_games(owner) {
         record_game_end(id, true);
     }
@@ -240,8 +227,7 @@ pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) 
     tell(player, &format!("Cleared {n} game(s)."));
 }
 
-/// Write AIR over a game's cells. Bulk (chunk-level); shared by punch-clear
-/// and `/ms clear`.
+/// Write AIR over a game's cells (bulk chunk writes).
 pub fn clear_blocks(world: &World, game: &GameInstance) {
     let mut bulk = helpers::BulkWriter::new(world);
     for cell in &game.board {
@@ -301,7 +287,7 @@ fn reveal_all(world: &World, game: &GameInstance) {
 }
 
 fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
-    // Iterative flood fill over empty cells (mirrors old DiggingEvent chains).
+    // Iterative flood fill over empty cells.
     let dim = game.dim;
     let mut stack = vec![start];
     let mut visited = vec![false; dim * dim];
@@ -366,8 +352,6 @@ pub enum ClickDecision {
     DenyLocked,
 }
 
-/// Left-click guard: only `Closed` cells of unlocked (or owned) live games
-/// react. Out-of-bounds indices are ignored defensively.
 pub fn decide_left(
     game: &GameInstance,
     who: crate::state::UuidKey,
@@ -385,8 +369,6 @@ pub fn decide_left(
     }
 }
 
-/// Right-click guard: `Closed` (flag) and `Flagged` (unflag) cells react,
-/// `Opened` cells are swallowed.
 pub fn decide_right(
     game: &GameInstance,
     who: crate::state::UuidKey,
@@ -404,16 +386,22 @@ pub fn decide_right(
     }
 }
 
-/// Pure first-click condition: nothing has been opened yet and the clicked
-/// cell is not empty, so the board must be regenerated before opening. Flags
-/// do not count as touched, so flagging before the first dig keeps the
-/// protection active.
-pub fn needs_first_click_reshuffle(board: &[core::Cell], idx: usize) -> bool {
+/// True until the first cell is opened: the board is generated on the first
+/// accepted dig. Flags do not count as touched.
+pub fn needs_first_dig(board: &[core::Cell]) -> bool {
     !board.iter().any(|c| c.state == CellState::Opened)
-        && board
-            .get(idx)
-            .is_some_and(|c| c.content != CellContent::Empty)
 }
+
+/// Carry pre-dig flags onto the board generated on the first click. Positions
+/// are identical, so indices line up.
+fn keep_flags(board: &mut [core::Cell], old: &[core::Cell]) {
+    for (cell, old) in board.iter_mut().zip(old) {
+        if old.state == CellState::Flagged {
+            cell.state = CellState::Flagged;
+        }
+    }
+}
+
 /// Left-click (block break) on a board cell. Always returns true: the click
 /// belonged to a game, so the caller must cancel the break event even when
 /// the click itself was a no-op (flagged cell, already open, locked game).
@@ -442,15 +430,15 @@ pub fn click_left(
             ClickDecision::DenyLocked => return Outcome::Locked,
             ClickDecision::Proceed => {}
         }
-        // First-click protection (mirrors the old regenerate_if_not_empty):
-        // never let the opening click be a bomb or a number. The safe
-        // generators exclude the clicked cell and its neighbourhood from bomb
-        // placement, so a single pass is enough.
-        if needs_first_click_reshuffle(&game.board, idx) {
+        // The board is generated on the first accepted dig, with the clicked
+        // cell and its neighbourhood guaranteed bomb-free. Flags placed before
+        // the dig are carried over so their state matches their world blocks.
+        if needs_first_dig(&game.board) {
             let origin = game.origin();
             let seed = state::next_rng_seed(game.owner);
             let mut rng = TinyRng::new(seed);
-            game.board = match game.kind {
+            let old = std::mem::take(&mut game.board);
+            let mut board = match game.kind {
                 GameKind::TwoD => generate_board_2d_safe(
                     game.dim,
                     bomb_amount_2d(game.dim),
@@ -466,8 +454,9 @@ pub fn click_left(
                     idx,
                 ),
             };
+            keep_flags(&mut board, &old);
+            game.board = board;
             game.seed = seed;
-            game.reshuffles = 1;
         }
         if owner != game.owner && !game.helpers.contains(&owner) {
             game.helpers.push(owner);
@@ -544,7 +533,6 @@ fn record_game_end(id: u32, allow_unfinished: bool) {
             g.locked,
             g.flags_placed,
             g.clicks,
-            g.reshuffles,
             g.opened_count(),
             g.flag_count(),
             g.bomb_total(),
@@ -568,7 +556,6 @@ fn record_game_end(id: u32, allow_unfinished: bool) {
         locked,
         flags_placed,
         clicks,
-        reshuffles,
         opened,
         flags,
         bombs,
@@ -612,7 +599,6 @@ fn record_game_end(id: u32, allow_unfinished: bool) {
         flags_placed,
         opened,
         clicks,
-        reshuffles,
         locked,
         x,
         y,
@@ -645,11 +631,9 @@ fn locate(game: &GameInstance, idx: usize) -> (usize, usize, usize) {
     }
 }
 
-/// Right-click (interact) flag toggle, applied synchronously.
-/// Always returns true when the position belongs to a game: toggled,
-/// spam-swallowed, locked, or already-open clicks are all consumed so the
-/// vanilla interact never places/uses a block. Uses the clicking player's
-/// own flag color (slot-44 cycling, red wool default).
+/// Right-click flag toggle, applied synchronously. Always returns true when
+/// the position belongs to a game, so the vanilla interact never places/uses
+/// a block. Uses the clicking player's own flag color.
 pub fn click_right(world: &World, player: &Player, id: u32, idx: usize) -> bool {
     let who = helpers::uuid_key(player);
     let outcome = state::with_game_mut(id, |game| {
@@ -662,7 +646,6 @@ pub fn click_right(world: &World, player: &Player, id: u32, idx: usize) -> bool 
         if state::flag_locked(id, idx, now) {
             return Outcome::Swallowed;
         }
-        // `decide_right` already proved `idx` is in bounds and not opened.
         let cell = &mut game.board[idx];
         let (flagged, pos) = match cell.state {
             CellState::Closed => {
@@ -699,7 +682,7 @@ pub fn click_right(world: &World, player: &Player, id: u32, idx: usize) -> bool 
     }
 }
 
-/// Plain-text status used by the unit tests (`#[cfg(test)]`).
+/// Plain-text status used by the unit tests.
 #[allow(dead_code)]
 pub fn status_line(id: u32) -> Option<String> {
     state::with_game(id, |g| {
@@ -722,7 +705,6 @@ pub fn status_line(id: u32) -> Option<String> {
     })
 }
 
-/// Route a world position to (game id, cell idx), if it is a board cell.
 pub fn route(pos: Pos3) -> Option<(u32, usize)> {
     let id = state::game_id_at(pos.x, pos.y, pos.z)?;
     let idx = state::with_game(id, |g| g.find_cell(pos))??;
@@ -826,7 +808,6 @@ mod tests {
             world_id: "test_world".to_string(),
             comp_time_ticks: 0,
             seed: 1,
-            reshuffles: 0,
             clicks: 0,
             flags_placed: 0,
             is_over: false,
@@ -854,7 +835,6 @@ mod tests {
         let open_game = test_game(owner, 60_011, false);
         assert_eq!(decide_left(&open_game, stranger, 0), ClickDecision::Proceed);
         assert_eq!(decide_right(&open_game, stranger, 0), ClickDecision::Proceed);
-        // Right-click allows unflagging but never acts on opened cells.
         assert_eq!(decide_right(&open_game, stranger, 2), ClickDecision::Proceed);
         assert_eq!(decide_right(&open_game, stranger, 3), ClickDecision::Ignore);
 
@@ -869,38 +849,52 @@ mod tests {
     }
 
     #[test]
-    fn reshuffle_only_on_untouched_nonempty_click() {
-        // Fresh all-closed board: bomb/number want a reshuffle, empty doesn't.
-        let mk = |content: CellContent| Cell {
-            content,
-            state: CellState::Closed,
+    fn first_dig_detection_ignores_flags() {
+        let mk = |state: CellState| Cell {
+            content: CellContent::Empty,
+            state,
             pos: Pos3::default(),
         };
+        // Nothing opened yet, flags included: the board is still ungenerated.
         let board = vec![
-            mk(CellContent::Bomb),
-            mk(CellContent::Empty),
-            mk(CellContent::Number(3)),
+            mk(CellState::Closed),
+            mk(CellState::Flagged),
+            mk(CellState::Closed),
         ];
-        assert!(board.iter().all(|c| c.state == CellState::Closed));
-        assert!(needs_first_click_reshuffle(&board, 0)); // bomb
-        assert!(needs_first_click_reshuffle(&board, 2)); // number
-        assert!(!needs_first_click_reshuffle(&board, 1)); // empty
-        assert!(!needs_first_click_reshuffle(&board, 99)); // OOB
-        // A pre-placed flag must not disable first-click protection.
-        let mut flagged = board.clone();
-        flagged[0].state = CellState::Flagged;
-        assert!(needs_first_click_reshuffle(&flagged, 2));
-        // A single opened cell anywhere ends first-click protection.
+        assert!(needs_first_dig(&board));
         let mut touched = board;
         touched[1].state = CellState::Opened;
-        assert!(!needs_first_click_reshuffle(&touched, 0));
+        assert!(!needs_first_dig(&touched));
+    }
+
+    #[test]
+    fn keep_flags_copies_flagged_states() {
+        let mk = |state: CellState| Cell {
+            content: CellContent::Empty,
+            state,
+            pos: Pos3::default(),
+        };
+        let old = vec![
+            mk(CellState::Flagged),
+            mk(CellState::Closed),
+            mk(CellState::Flagged),
+        ];
+        let mut new = vec![
+            mk(CellState::Closed),
+            mk(CellState::Closed),
+            mk(CellState::Closed),
+        ];
+        keep_flags(&mut new, &old);
+        assert_eq!(new[0].state, CellState::Flagged);
+        assert_eq!(new[1].state, CellState::Closed);
+        assert_eq!(new[2].state, CellState::Flagged);
     }
 
     #[test]
     fn locate_roundtrips_generated_boards() {
         let origin = Pos3::new(200, 64, 300);
         let mut rng = TinyRng::new(0x5EED);
-        let board2 = generate_board_2d(4, bomb_amount_2d(4), origin, &mut rng);
+        let board2 = generate_board_2d_safe(4, bomb_amount_2d(4), origin, &mut rng, 0);
         let game2 = GameInstance {
             kind: GameKind::TwoD,
             dim: 4,
@@ -913,7 +907,6 @@ mod tests {
             world_id: "w".to_string(),
             comp_time_ticks: 0,
             seed: 1,
-            reshuffles: 0,
             clicks: 0,
             flags_placed: 0,
             is_over: false,
@@ -931,7 +924,7 @@ mod tests {
         }
 
         let mut rng = TinyRng::new(0x5EED);
-        let board3 = generate_board_3d(3, bomb_amount_3d(3), origin, &mut rng);
+        let board3 = generate_board_3d_safe(3, bomb_amount_3d(3), origin, &mut rng, 0);
         let game3 = GameInstance {
             kind: GameKind::ThreeD,
             dim: 3,
@@ -944,7 +937,6 @@ mod tests {
             world_id: "w".to_string(),
             comp_time_ticks: 0,
             seed: 1,
-            reshuffles: 0,
             clicks: 0,
             flags_placed: 0,
             is_over: false,

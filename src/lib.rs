@@ -44,8 +44,6 @@ impl Plugin for MinesweeperPlugin {
     fn on_load(&self, context: Context) -> pumpkin_plugin_api::Result<()> {
         info!("Minesweeper loading");
 
-        // SQLite records (fail-soft: the game runs without them).
-        // Needs the `fs.write.data` manifest permission for `data/`.
         crate::db::setup();
 
         infinite::register_generator();
@@ -117,7 +115,6 @@ impl Plugin for MinesweeperPlugin {
         }
         context.register_command(cmd, "Minesweeper:command.ms");
 
-        // Lock the server down for minigame mode: no mob spawning etc.
         let server = context.get_server();
         for world in server.get_all_worlds() {
             helpers::apply_peaceful_rules(&world);
