@@ -83,8 +83,36 @@ pub fn bomb_amount_2d(dim: usize) -> usize {
 }
 
 pub fn generate_board_2d(dim: usize, bomb_amt: usize, origin: Pos3, rng: &mut TinyRng) -> Vec<Cell> {
+    generate_board_2d_avoiding(dim, bomb_amt, origin, rng, &[])
+}
+
+/// Like [`generate_board_2d`], but the cell at `safe` and its neighbours can
+/// never hold a bomb, so a first click there is guaranteed to be `Empty`.
+/// Tiny boards (2x2) have no zero-cell at all; there the bomb count wins and
+/// the guarantee degrades to "never a bomb".
+pub fn generate_board_2d_safe(
+    dim: usize,
+    bomb_amt: usize,
+    origin: Pos3,
+    rng: &mut TinyRng,
+    safe: usize,
+) -> Vec<Cell> {
+    let mut avoid = avoid_for_2d(dim, safe);
+    if dim * dim - avoid.len() < bomb_amt {
+        avoid = vec![safe];
+    }
+    generate_board_2d_avoiding(dim, bomb_amt, origin, rng, &avoid)
+}
+
+fn generate_board_2d_avoiding(
+    dim: usize,
+    bomb_amt: usize,
+    origin: Pos3,
+    rng: &mut TinyRng,
+    avoid: &[usize],
+) -> Vec<Cell> {
     let mut board = vec![Cell::default(); dim * dim];
-    place_bombs_exact(&mut board, bomb_amt, rng);
+    place_bombs_exact(&mut board, bomb_amt, rng, avoid);
     for y in 0..dim {
         for x in 0..dim {
             let idx = y * dim + x;
@@ -101,13 +129,22 @@ pub fn generate_board_2d(dim: usize, bomb_amt: usize, origin: Pos3, rng: &mut Ti
     board
 }
 
-/// Place exactly `bomb_amt` bombs at distinct random cells (Fisher-Yates).
-fn place_bombs_exact(board: &mut [Cell], bomb_amt: usize, rng: &mut TinyRng) {
-    let total = board.len();
-    let bomb_amt = bomb_amt.min(total);
-    let mut indices: Vec<usize> = (0..total).collect();
+/// Cells that must stay bomb-free for a safe first click: the cell itself
+/// plus every neighbour.
+fn avoid_for_2d(dim: usize, safe: usize) -> Vec<usize> {
+    let (sx, sy) = (safe % dim, safe / dim);
+    let mut avoid = vec![safe];
+    avoid.extend(adjacent_2d(dim, sx, sy).into_iter().map(|(x, y)| y * dim + x));
+    avoid
+}
+
+/// Place exactly `bomb_amt` bombs at distinct random cells (Fisher-Yates),
+/// never on an index in `avoid`.
+fn place_bombs_exact(board: &mut [Cell], bomb_amt: usize, rng: &mut TinyRng, avoid: &[usize]) {
+    let mut indices: Vec<usize> = (0..board.len()).filter(|i| !avoid.contains(i)).collect();
+    let bomb_amt = bomb_amt.min(indices.len());
     for i in 0..bomb_amt {
-        let j = i + (rng.next_u64() as usize % (total - i));
+        let j = i + (rng.next_u64() as usize % (indices.len() - i));
         indices.swap(i, j);
         board[indices[i]].content = CellContent::Bomb;
     }
@@ -149,11 +186,6 @@ pub fn adjacent_2d(dim: usize, x: usize, y: usize) -> Vec<(usize, usize)> {
         }
     }
     out
-}
-
-/// True when no cell has been opened yet (first-click protection applies).
-pub fn all_closed(board: &[Cell]) -> bool {
-    board.iter().all(|c| c.state == CellState::Closed)
 }
 
 /// Win check: every non-bomb cell opened.
@@ -201,8 +233,36 @@ pub fn generate_board_3d(
     origin: Pos3,
     rng: &mut TinyRng,
 ) -> Vec<Cell> {
+    generate_board_3d_avoiding(dim, bomb_amt, origin, rng, &[])
+}
+
+/// Like [`generate_board_3d`], but the cell at `safe` and its 26 neighbours
+/// can never hold a bomb, so a first click there is guaranteed to be `Empty`.
+/// 2x2x2 has no zero-cell at all; there the bomb count wins and the guarantee
+/// degrades to "never a bomb".
+pub fn generate_board_3d_safe(
+    dim: usize,
+    bomb_amt: usize,
+    origin: Pos3,
+    rng: &mut TinyRng,
+    safe: usize,
+) -> Vec<Cell> {
+    let mut avoid = avoid_for_3d(dim, safe);
+    if dim * dim * dim - avoid.len() < bomb_amt {
+        avoid = vec![safe];
+    }
+    generate_board_3d_avoiding(dim, bomb_amt, origin, rng, &avoid)
+}
+
+fn generate_board_3d_avoiding(
+    dim: usize,
+    bomb_amt: usize,
+    origin: Pos3,
+    rng: &mut TinyRng,
+    avoid: &[usize],
+) -> Vec<Cell> {
     let mut board = vec![Cell::default(); dim * dim * dim];
-    place_bombs_exact(&mut board, bomb_amt, rng);
+    place_bombs_exact(&mut board, bomb_amt, rng, avoid);
     for z in 0..dim {
         for y in 0..dim {
             for x in 0..dim {
@@ -220,6 +280,19 @@ pub fn generate_board_3d(
         }
     }
     board
+}
+
+/// Cells that must stay bomb-free for a safe first click: the cell itself
+/// plus every neighbour.
+fn avoid_for_3d(dim: usize, safe: usize) -> Vec<usize> {
+    let (x, y, z) = (safe % dim, (safe / dim) % dim, safe / (dim * dim));
+    let mut avoid = vec![safe];
+    avoid.extend(
+        adjacent_3d(dim, x, y, z)
+            .into_iter()
+            .map(|(x, y, z)| (z * dim + y) * dim + x),
+    );
+    avoid
 }
 
 pub fn adjacent_3d(dim: usize, x: usize, y: usize, z: usize) -> Vec<(usize, usize, usize)> {
@@ -450,7 +523,7 @@ mod tests {
     fn win_and_closed_transitions() {
         let mut board = vec![Cell::default(); 4];
         board[0].content = CellContent::Bomb;
-        assert!(all_closed(&board));
+        assert!(board.iter().all(|c| c.state == CellState::Closed));
         assert!(!is_won(&board));
         // Flagging the bomb still counts as "not opened, but a bomb" -> win
         // once everything else is open.
@@ -458,7 +531,7 @@ mod tests {
         for c in board.iter_mut().skip(1) {
             c.state = CellState::Opened;
         }
-        assert!(!all_closed(&board));
+        assert!(board.iter().any(|c| c.state != CellState::Closed));
         assert!(is_won(&board));
     }
 
@@ -505,6 +578,94 @@ mod tests {
                     }
                 }
                 assert_eq!(infinite_number_at(x, z, 777), manual, "at {x},{z}");
+            }
+        }
+    }
+
+    #[test]
+    fn safe_generators_never_start_on_a_bomb() {
+        for dim in [2usize, 3, 5, 7] {
+            for safe in 0..dim * dim * dim {
+                let mut rng = TinyRng::new(7);
+                let board = generate_board_3d_safe(
+                    dim,
+                    bomb_amount_3d(dim),
+                    Pos3::new(0, 64, 0),
+                    &mut rng,
+                    safe,
+                );
+                assert_ne!(
+                    board[safe].content,
+                    CellContent::Bomb,
+                    "3D dim={dim} safe={safe}"
+                );
+                assert_eq!(
+                    board.iter().filter(|c| c.content == CellContent::Bomb).count(),
+                    bomb_amount_3d(dim),
+                    "3D dim={dim} bomb count changed"
+                );
+            }
+        }
+        for dim in [2usize, 3, 10, 20] {
+            for safe in 0..dim * dim {
+                let mut rng = TinyRng::new(11);
+                let board = generate_board_2d_safe(
+                    dim,
+                    bomb_amount_2d(dim),
+                    Pos3::new(0, 64, 0),
+                    &mut rng,
+                    safe,
+                );
+                assert_ne!(
+                    board[safe].content,
+                    CellContent::Bomb,
+                    "2D dim={dim} safe={safe}"
+                );
+                assert_eq!(
+                    board.iter().filter(|c| c.content == CellContent::Bomb).count(),
+                    bomb_amount_2d(dim),
+                    "2D dim={dim} bomb count changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn safe_generators_guarantee_empty_when_mathematically_possible() {
+        // An Empty start needs every bomb outside the clicked cell plus its
+        // neighbourhood; skip indices where that is impossible (tiny boards).
+        for dim in [5usize, 7] {
+            let amt = bomb_amount_3d(dim);
+            for safe in 0..dim * dim * dim {
+                let (x, y, z) = (safe % dim, (safe / dim) % dim, safe / (dim * dim));
+                if dim.pow(3) - 1 - adjacent_3d(dim, x, y, z).len() < amt {
+                    continue;
+                }
+                let mut rng = TinyRng::new(safe as u64 + 1);
+                let board =
+                    generate_board_3d_safe(dim, amt, Pos3::new(0, 64, 0), &mut rng, safe);
+                assert_eq!(
+                    board[safe].content,
+                    CellContent::Empty,
+                    "3D dim={dim} safe={safe}"
+                );
+            }
+        }
+        for dim in [10usize, 20] {
+            let amt = bomb_amount_2d(dim);
+            for safe in 0..dim * dim {
+                let (x, y) = (safe % dim, safe / dim);
+                if dim.pow(2) - 1 - adjacent_2d(dim, x, y).len() < amt {
+                    continue;
+                }
+                let mut rng = TinyRng::new(safe as u64 + 1);
+                let board =
+                    generate_board_2d_safe(dim, amt, Pos3::new(0, 64, 0), &mut rng, safe);
+                assert_eq!(
+                    board[safe].content,
+                    CellContent::Empty,
+                    "2D dim={dim} safe={safe}"
+                );
             }
         }
     }

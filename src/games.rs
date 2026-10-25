@@ -5,8 +5,8 @@ use pumpkin_plugin_api::{Player, World};
 use crate::{
     core::{
         self, adjacent_2d, adjacent_3d, bomb_amount_2d, bomb_amount_3d, generate_board_2d,
-        generate_board_3d, is_won, CellContent, CellState, Pos3, TinyRng,
-        AIR_BLOCK, COVERED_BLOCK,
+        generate_board_2d_safe, generate_board_3d, generate_board_3d_safe, is_won, CellContent,
+        CellState, Pos3, TinyRng, AIR_BLOCK, COVERED_BLOCK,
     },
     helpers::{self, is_air, play_sound, set_block, set_tile, tell, Sound},
     state::{
@@ -404,10 +404,12 @@ pub fn decide_right(
     }
 }
 
-/// Pure first-click condition: the board is untouched and the clicked cell is
-/// not empty, so the board must be regenerated before opening.
+/// Pure first-click condition: nothing has been opened yet and the clicked
+/// cell is not empty, so the board must be regenerated before opening. Flags
+/// do not count as touched, so flagging before the first dig keeps the
+/// protection active.
 pub fn needs_first_click_reshuffle(board: &[core::Cell], idx: usize) -> bool {
-    core::all_closed(board)
+    !board.iter().any(|c| c.state == CellState::Opened)
         && board
             .get(idx)
             .is_some_and(|c| c.content != CellContent::Empty)
@@ -441,28 +443,31 @@ pub fn click_left(
             ClickDecision::Proceed => {}
         }
         // First-click protection (mirrors the old regenerate_if_not_empty):
-        // never let the opening click be a bomb or a number.
+        // never let the opening click be a bomb or a number. The safe
+        // generators exclude the clicked cell and its neighbourhood from bomb
+        // placement, so a single pass is enough.
         if needs_first_click_reshuffle(&game.board, idx) {
             let origin = game.origin();
-            let mut seed = state::next_rng_seed(game.owner);
-            for attempt in 0..64u32 {
-                seed = seed.wrapping_add(0x9E3779B97F4A7C15);
-                let mut rng = TinyRng::new(seed);
-                let board = match game.kind {
-                    GameKind::TwoD => {
-                        generate_board_2d(game.dim, bomb_amount_2d(game.dim), origin, &mut rng)
-                    }
-                    GameKind::ThreeD => {
-                        generate_board_3d(game.dim, bomb_amount_3d(game.dim), origin, &mut rng)
-                    }
-                };
-                if board[idx].content == CellContent::Empty {
-                    game.board = board;
-                    game.seed = seed;
-                    game.reshuffles = attempt + 1;
-                    break;
-                }
-            }
+            let seed = state::next_rng_seed(game.owner);
+            let mut rng = TinyRng::new(seed);
+            game.board = match game.kind {
+                GameKind::TwoD => generate_board_2d_safe(
+                    game.dim,
+                    bomb_amount_2d(game.dim),
+                    origin,
+                    &mut rng,
+                    idx,
+                ),
+                GameKind::ThreeD => generate_board_3d_safe(
+                    game.dim,
+                    bomb_amount_3d(game.dim),
+                    origin,
+                    &mut rng,
+                    idx,
+                ),
+            };
+            game.seed = seed;
+            game.reshuffles = 1;
         }
         if owner != game.owner && !game.helpers.contains(&owner) {
             game.helpers.push(owner);
@@ -876,11 +881,15 @@ mod tests {
             mk(CellContent::Empty),
             mk(CellContent::Number(3)),
         ];
-        assert!(core::all_closed(&board));
+        assert!(board.iter().all(|c| c.state == CellState::Closed));
         assert!(needs_first_click_reshuffle(&board, 0)); // bomb
         assert!(needs_first_click_reshuffle(&board, 2)); // number
         assert!(!needs_first_click_reshuffle(&board, 1)); // empty
         assert!(!needs_first_click_reshuffle(&board, 99)); // OOB
+        // A pre-placed flag must not disable first-click protection.
+        let mut flagged = board.clone();
+        flagged[0].state = CellState::Flagged;
+        assert!(needs_first_click_reshuffle(&flagged, 2));
         // A single opened cell anywhere ends first-click protection.
         let mut touched = board;
         touched[1].state = CellState::Opened;
