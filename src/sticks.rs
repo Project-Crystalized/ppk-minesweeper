@@ -16,10 +16,10 @@ const STARTERS: [(&str, NewGameSpec); 5] = [
     ("Minesweeper3d7x7", NewGameSpec::THREE_D_7),
 ];
 
-/// Slot-43 lock item names (mirrors old `GameLock` horse-armor items).
+/// Lock-item names, shown by the horse-armor stack in the hotbar.
 pub const LOCKED_NAME: &str = "Game is Locked";
 pub const UNLOCKED_NAME: &str = "Game is Unlocked";
-/// Slot-44 flag color item name (mirrors old `FlagType` wool item).
+/// Flag-switcher name, shown by the wool stack in the hotbar.
 pub const FLAG_SWITCH_NAME: &str = "Switch flag color";
 
 pub enum HeldSpecial {
@@ -106,54 +106,46 @@ pub fn held_starter(player: &Player) -> Option<NewGameSpec> {
     None
 }
 
-/// Pumpkin storage slot layout (verified against the host
-/// `pumpkin-inventory` crate): `get/set_inventory_item` address the raw
-/// `PlayerInventory` storage, where **0-35 is the main inventory with 0-8
-/// as the hotbar**, 36-39 are armor and 40 is the offhand.
+/// Pumpkin storage layout: `get/set_inventory_item` address the raw
+/// `PlayerInventory`, where **0-35 is the main inventory with 0-8 as the
+/// hotbar**, 36-39 are armor, and 40 is the offhand.
 ///
-/// WARNING: the host forwards that index verbatim as the *window* slot in
-/// `CSetContainerSlot` (`CSetContainerSlot::new(0, 0, slot)`), but vanilla
-/// window 0 numbers slots differently: 0 = crafting output, 1-4 = crafting,
-/// 5-8 = armor, 9-35 = main, 36-44 = hotbar, 45 = offhand. The host's own
-/// typed setters translate (e.g. chestplate storage 38 -> packet slot 6,
-/// offhand storage 40 -> packet slot 45); the generic per-slot API does
-/// not. Consequence: only storage slots **9-35 render where they live**.
-/// Anything placed at 0-8 shows up in the crafting/armor area (invisible in
-/// the HUD, appearing as a "second set" when the inventory is opened), and
-/// 36-40 render over the hotbar while actually sitting in equipment slots.
-/// So the kit lives in the main grid (9-15), and generic writes never touch
-/// 0-8 or 36-40.
-/// Last storage slot: 36-39 armor, 40 offhand.
+/// Pumpkin 0.2.1's plugin host syncs writes through
+/// `Player::sync_hand_slot`, sending the raw storage index in
+/// `CSetPlayerInventory` and refreshing the player screen. That makes
+/// hotbar slots 0-8 safe to write directly (older hosts used the raw index
+/// as a window slot and needed the main-grid workaround).
 pub const OFFHAND_SLOT: u8 = 40;
-/// Display-safe grid range: storage and window numbering agree here.
-const GRID_START: u8 = 9;
+/// Utility slots within the hotbar: lock toggle, then flag color.
+const LOCK_SLOT: u8 = 7;
+const FLAG_SLOT: u8 = 8;
 
-/// Fixed main-grid layout: 5 starters, then the lock toggle and the flag
-/// color switcher (slots 9-15).
-fn kit_grid_layout(player: &Player) -> [(u8, ItemStack); 7] {
+/// Fixed hotbar layout: five starters in slots 0-4, then the lock toggle
+/// and flag color switcher in slots 7-8. Slots 5-6 stay empty.
+fn kit_layout(player: &Player) -> [(u8, ItemStack); 7] {
     use crate::helpers::uuid_key;
     let key = uuid_key(player);
     let any_locked = crate::state::all_games_detailed()
         .iter()
         .any(|g| g.owner == key && g.locked);
     [
-        (9, make_stick(STARTERS[0].0)),
-        (10, make_stick(STARTERS[1].0)),
-        (11, make_stick(STARTERS[2].0)),
-        (12, make_stick(STARTERS[3].0)),
-        (13, make_stick(STARTERS[4].0)),
-        (14, make_lock_item(any_locked)),
+        (0, make_stick(STARTERS[0].0)),
+        (1, make_stick(STARTERS[1].0)),
+        (2, make_stick(STARTERS[2].0)),
+        (3, make_stick(STARTERS[3].0)),
+        (4, make_stick(STARTERS[4].0)),
+        (LOCK_SLOT, make_lock_item(any_locked)),
         (
-            15,
+            FLAG_SLOT,
             make_flag_item(crate::state::flag_block_for(key)),
         ),
     ]
 }
 
 /// Join flow: wipe everything (main, armor, offhand) so no stale kit pieces
-/// survive anywhere, then lay out the full 7-piece kit in the display-safe
-/// grid. Equipment slots are cleared explicitly on top of `clear_all` so a
-/// host that ever changes `clear_all` semantics can't leave ghosts behind.
+/// survive anywhere, then lay out the full 7-piece kit in the hotbar.
+/// Equipment slots are cleared explicitly on top of `clear_all` so a host
+/// that ever changes `clear_all` semantics can't leave ghosts behind.
 /// Slots 41+ are never touched: the server stores nothing there while the
 /// client would still render an item (ghost duplicates). The offhand is
 /// deliberately left empty.
@@ -163,7 +155,7 @@ pub fn give_fresh_kit(player: &Player) -> usize {
         player.set_inventory_item(slot, None);
     }
     let mut given = 0;
-    for (slot, stack) in kit_grid_layout(player) {
+    for (slot, stack) in kit_layout(player) {
         player.set_inventory_item(slot, Some(stack));
         given += 1;
     }
@@ -171,11 +163,8 @@ pub fn give_fresh_kit(player: &Player) -> usize {
 }
 
 /// Refresh the lock item name(s) to the player's current aggregate lock
-/// state and the flag item to the current flag color. Skips hotbar slots
-/// 0-8: those render at window slots 0-8 (crafting area) through this API,
-/// so rewriting them would visually teleport a correctly-placed hotbar item
-/// away. A hotbar utility item keeps a stale name until the next rewrite
-/// from the grid rather than jumping around the screen.
+/// state and the flag item to the current flag color. Scans every storage
+/// slot so hotbar utilities are updated in place.
 pub fn refresh_utility_items(player: &Player) {
     use crate::helpers::uuid_key;
     let key = uuid_key(player);
@@ -184,9 +173,6 @@ pub fn refresh_utility_items(player: &Player) {
         .any(|g| g.owner == key && g.locked);
     let flag_block = crate::state::flag_block_for(key);
     for slot in 0..=OFFHAND_SLOT {
-        if slot < GRID_START {
-            continue;
-        }
         let Some(stack) = player.get_inventory_item(slot) else {
             continue;
         };

@@ -22,8 +22,8 @@ pub struct JoinListener;
 impl EventHandler<PlayerJoinEvent> for JoinListener {
     fn handle(&self, _server: Server, event: EventData<PlayerJoinEvent>) -> EventData<PlayerJoinEvent> {
         // Fresh minigame inventory: wipe first (stale kit pieces could sit in
-        // armor/offhand slots), then lay out the kit in the main inventory
-        // grid. Drag a starter to your hotbar and right-click to play.
+        // armor/offhand slots), then put the starter and utility items in the
+        // hotbar. Number keys select them directly.
         crate::sticks::give_fresh_kit(&event.player);
         crate::state::mark_join(crate::helpers::uuid_key(&event.player));
         crate::db::touch_player(
@@ -37,7 +37,7 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
         crate::infinite::hydrate_session(&event.player);
         tell(
             &event.player,
-            "Minesweeper is installed! Starter sticks are in your inventory - drag one to your hotbar and right-click to play, or /ms help. Building, breaking and mob spawning are disabled.",
+            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-5 and right-click to play, or /ms help. Building, breaking and mob spawning are disabled.",
         );
         event
     }
@@ -121,8 +121,9 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
             event.cancelled = true;
             return event;
         }
-        // Lock toggle / flag-color cycle items (slot 43/44 equivalents).
-        // They work on air clicks too, like the old InteractItemEvent flow.
+        // Lock toggle / flag-color cycle items in the hotbar (old slot 43/44
+        // equivalents). They work on air clicks too, like the old
+        // InteractItemEvent flow.
         if let Some(special) = crate::sticks::held_special(&event.player) {
             use crate::sticks::HeldSpecial;
             match special {
