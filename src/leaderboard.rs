@@ -68,8 +68,8 @@ impl Facing {
 }
 
 /// Hardcoded boards in the spawn plaza: two rows of three spots each
-/// (x spacing 13), south wall at z=128 facing south and north wall at
-/// z=183 facing north. Four boards fill four of the six spots; the x=422
+/// (x spacing 13), south wall at z=1024 facing south and north wall at
+/// z=1079 facing north. Four boards fill four of the six spots; the x=1117
 /// spots on both walls are reserved for future boards.
 /// Line 0 is the header at the TOP; entries stack downward from it.
 /// Edit the numbers to move a board.
@@ -81,9 +81,9 @@ const BOARDS: [Board; 4] = [
         dim: 50,
         kind: BoardKind::FastestWins,
         facing: Facing::South,
-        x: 396.0,
+        x: 1091.0,
         y: 75.0,
-        z: 128.0,
+        z: 1024.0,
     },
     Board {
         tag: "ms_lb_3d7",
@@ -92,9 +92,9 @@ const BOARDS: [Board; 4] = [
         dim: 7,
         kind: BoardKind::FastestWins,
         facing: Facing::South,
-        x: 409.0,
+        x: 1104.0,
         y: 75.0,
-        z: 128.0,
+        z: 1024.0,
     },
     Board {
         tag: "ms_lb_2d50_games",
@@ -103,9 +103,9 @@ const BOARDS: [Board; 4] = [
         dim: 50,
         kind: BoardKind::MostGames,
         facing: Facing::North,
-        x: 396.0,
+        x: 1091.0,
         y: 75.0,
-        z: 183.0,
+        z: 1079.0,
     },
     Board {
         tag: "ms_lb_3d7_games",
@@ -114,9 +114,9 @@ const BOARDS: [Board; 4] = [
         dim: 7,
         kind: BoardKind::MostGames,
         facing: Facing::North,
-        x: 409.0,
+        x: 1104.0,
         y: 75.0,
-        z: 183.0,
+        z: 1079.0,
     },
 ];
 
@@ -217,6 +217,25 @@ fn dist2(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
     (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)
 }
 
+/// Remove tagged displays left behind at a board's old spot. The keeper
+/// lookup below matches by tag anywhere in the loaded world, so without
+/// this an old copy could win the lookup after the plaza moves.
+fn purge_offsite_tagged(world: &World, tag: &str, pos: (f64, f64, f64)) {
+    for entity in world.get_entities() {
+        if entity
+            .get_custom_name()
+            .map(|c| c.get_text().to_string())
+            .as_deref()
+            != Some(tag)
+        {
+            continue;
+        }
+        if dist2(entity.get_position(), pos) > 4.0 {
+            entity.remove();
+        }
+    }
+}
+
 /// Remove every text display within [`WIPE_DIST2`] of `pos` whose custom
 /// name is not in `keep`. `keep` empty = boot wipe (removes our own stale
 /// keepers too); live refreshes pass all board tags so only strays die.
@@ -251,6 +270,7 @@ fn board_tags() -> Vec<&'static str> {
 fn refresh_board(world: &World, board: &Board) {
     let pos = (board.x, board.y, board.z);
     let text = board_text(board);
+    purge_offsite_tagged(world, board.tag, pos);
     let forced_fresh = fresh_cycle()
         .lock()
         .unwrap_or_else(|e| e.into_inner())

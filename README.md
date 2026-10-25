@@ -73,20 +73,12 @@ with `sqlite3` like the other game DBs.
 
 Four all-time boards as text display entities, refreshed from SQLite every
 60 seconds (plus once ~2s after load), around the spawn plaza of the default
-world (`"world"`, else the first loaded world):
+world (`"world"`, else the first loaded world).
 
-| Board | Position | Facing |
-| --- | --- | --- |
-| 2D 50x50 All-Time Best | (396, 75, 128) | south |
-| 3D 7x7x7 All-Time Best | (409, 75, 128) | south |
-| 2D 50x50 Most Games Finished | (396, 75, 183) | north |
-| 3D 7x7x7 Most Games Finished | (409, 75, 183) | north |
-
-The x=422 spot on both walls is free for future boards. Each board is one
-gold header on top plus the top-10 lines below it in a single text display
-entity (tags `ms_lb_2d50`, `ms_lb_3d7`, `ms_lb_2d50_games`,
+Each board is one gold header on top plus the top-10 lines below it in a
+single text display entity (tags `ms_lb_2d50`, `ms_lb_3d7`, `ms_lb_2d50_games`,
 `ms_lb_3d7_games`). Refresh re-styles and re-texts the tagged keeper, and
-restarts heal without ghosts; coordinates and facings live in
+restarts heal without ghosts; positions and facings live in
 `src/leaderboard.rs` (`BOARDS`). Two of the four boards rank most games
 finished for a spec; abandoned boards are stored in `MsGames` but do not
 count there. `/ms top` shows the fastest wins and best infinite streaks in
