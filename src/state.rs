@@ -103,8 +103,8 @@ impl GameInstance {
 
 struct State {
     games: HashMap<u32, GameInstance>,
-    /// Block position -> game id, for O(1) click routing.
-    pos_index: HashMap<(i32, i32, i32), u32>,
+    /// World id -> block position -> game id, for O(1) click routing.
+    pos_index: HashMap<String, HashMap<(i32, i32, i32), u32>>,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -227,8 +227,9 @@ fn lock() -> std::sync::MutexGuard<'static, State> {
 pub fn insert_game(game: GameInstance) -> u32 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let mut s = lock();
+    let index = s.pos_index.entry(game.world_id.clone()).or_default();
     for cell in &game.board {
-        s.pos_index.insert((cell.pos.x, cell.pos.y, cell.pos.z), id);
+        index.insert((cell.pos.x, cell.pos.y, cell.pos.z), id);
     }
     s.games.insert(id, game);
     id
@@ -242,8 +243,12 @@ pub fn with_game_mut<R>(id: u32, f: impl FnOnce(&mut GameInstance) -> R) -> Opti
     lock().games.get_mut(&id).map(f)
 }
 
-pub fn game_id_at(x: i32, y: i32, z: i32) -> Option<u32> {
-    lock().pos_index.get(&(x, y, z)).copied()
+pub fn game_id_at(world_id: &str, x: i32, y: i32, z: i32) -> Option<u32> {
+    lock()
+        .pos_index
+        .get(world_id)?
+        .get(&(x, y, z))
+        .copied()
 }
 
 pub fn player_game_count(owner: UuidKey) -> usize {
@@ -274,8 +279,19 @@ pub fn update_owner_name(owner: UuidKey, name: &str) {
 pub fn remove_game(id: u32) -> Option<GameInstance> {
     let mut s = lock();
     let game = s.games.remove(&id)?;
-    for cell in &game.board {
-        s.pos_index.remove(&(cell.pos.x, cell.pos.y, cell.pos.z));
+    let empty = if let Some(index) = s.pos_index.get_mut(&game.world_id) {
+        for cell in &game.board {
+            let key = (cell.pos.x, cell.pos.y, cell.pos.z);
+            if index.get(&key) == Some(&id) {
+                index.remove(&key);
+            }
+        }
+        index.is_empty()
+    } else {
+        false
+    };
+    if empty {
+        s.pos_index.remove(&game.world_id);
     }
     Some(game)
 }
@@ -506,12 +522,13 @@ mod tests {
     fn lifecycle_routes_cells_and_cleans_up() {
         let owner = (0xAAA1_0001, 0xBBB1_0001);
         let id = insert_game(mk_game(owner, 50_001, false));
-        assert_eq!(game_id_at(50_001, 100, 9001), Some(id));
-        assert_eq!(game_id_at(50_002, 100, 9001), Some(id));
-        assert_eq!(game_id_at(50_003, 100, 9001), None);
+        assert_eq!(game_id_at("test_world", 50_001, 100, 9001), Some(id));
+        assert_eq!(game_id_at("test_world", 50_002, 100, 9001), Some(id));
+        assert_eq!(game_id_at("test_world", 50_003, 100, 9001), None);
+        assert_eq!(game_id_at("other_world", 50_001, 100, 9001), None);
         // Removal unindexes every cell: no ghost clicks afterwards.
         remove_game(id);
-        assert_eq!(game_id_at(50_001, 100, 9001), None);
+        assert_eq!(game_id_at("test_world", 50_001, 100, 9001), None);
     }
 
     #[test]

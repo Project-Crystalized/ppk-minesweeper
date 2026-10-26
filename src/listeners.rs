@@ -77,6 +77,7 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
             return event;
         };
         let world = player.get_world();
+        let world_id = world.get_id();
         let pos = to_pos3(event.block_pos);
 
         // Bedrock does not fire PlayerInteractEvent for block clicks.
@@ -90,7 +91,7 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
             return event;
         }
 
-        if let Some((id, idx)) = games::route(pos) {
+        if let Some((id, idx)) = games::route(&world_id, pos) {
             // Board clicks never break the underlying block, even when the
             // click itself is a no-op (flagged/open/locked/finished board).
             games::click_left(&world, player, id, idx);
@@ -177,9 +178,10 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
             return event;
         };
         let world = event.player.get_world();
+        let world_id = world.get_id();
         let pos = to_pos3(clicked);
 
-        if let Some((id, idx)) = games::route(pos) {
+        if let Some((id, idx)) = games::route(&world_id, pos) {
             games::click_right(&world, &event.player, id, idx);
             event.cancelled = true;
             return event;

@@ -705,8 +705,8 @@ pub fn status_line(id: u32) -> Option<String> {
     })
 }
 
-pub fn route(pos: Pos3) -> Option<(u32, usize)> {
-    let id = state::game_id_at(pos.x, pos.y, pos.z)?;
+pub fn route(world_id: &str, pos: Pos3) -> Option<(u32, usize)> {
+    let id = state::game_id_at(world_id, pos.x, pos.y, pos.z)?;
     let idx = state::with_game(id, |g| g.find_cell(pos))??;
     Some((id, idx))
 }
@@ -958,7 +958,7 @@ mod tests {
         let owner = (0xBEEF_0004, 0xCAFE_0004);
         let id = state::insert_game(test_game(owner, 60_051, true));
         let pos = Pos3::new(60_051, 200, 7001);
-        let (rid, idx) = route(pos).expect("inserted game must route");
+        let (rid, idx) = route("test_world", pos).expect("inserted game must route");
         assert_eq!((rid, idx), (id, 0));
         assert!(status_line(id).unwrap().contains("[Locked]"));
         let listing = describe_all_for(Some(owner));
@@ -972,6 +972,29 @@ mod tests {
         assert_eq!(toggle_lock_report(owner, Some(id)), format!("Game #{id} unlocked."));
         assert!(!status_line(id).unwrap().contains("[Locked]"));
         state::remove_game(id);
-        assert_eq!(route(pos), None);
+        assert_eq!(route("test_world", pos), None);
+    }
+
+    #[test]
+    fn route_is_isolated_by_world() {
+        let owner = (0xBEEF_0005, 0xCAFE_0005);
+        let mut in_a = test_game(owner, 60_061, false);
+        in_a.world_id = "world_a".to_string();
+        let mut in_b = test_game(owner, 60_061, false);
+        in_b.world_id = "world_b".to_string();
+        let id_a = state::insert_game(in_a);
+        let id_b = state::insert_game(in_b);
+        let pos = Pos3::new(60_061, 200, 7001);
+
+        assert_eq!(route("world_a", pos), Some((id_a, 0)));
+        assert_eq!(route("world_b", pos), Some((id_b, 0)));
+        assert_eq!(route("world_c", pos), None);
+
+        state::remove_game(id_a);
+        assert_eq!(route("world_a", pos), None);
+        assert_eq!(route("world_b", pos), Some((id_b, 0)));
+
+        state::remove_game(id_b);
+        assert_eq!(route("world_b", pos), None);
     }
 }
