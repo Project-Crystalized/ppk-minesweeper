@@ -36,7 +36,7 @@ struct Board {
 #[derive(Clone, Copy, PartialEq)]
 enum BoardKind {
     FastestWins,
-    MostGames,
+    MostWins,
 }
 
 /// Fixed text orientation. The display's default fixed plane faces south
@@ -95,33 +95,33 @@ const BOARDS: [Board; 6] = [
         z: 1024.0,
     },
     Board {
-        tag: "ms_lb_2d20_games",
-        title: "2D 20x20 Most Games Finished",
+        tag: "ms_lb_2d20_wins",
+        title: "2D 20x20 Most Wins",
         game_kind: crate::db::KIND_2D,
         dim: 20,
-        kind: BoardKind::MostGames,
+        kind: BoardKind::MostWins,
         facing: Facing::North,
         x: 1091.0,
         y: 75.0,
         z: 1079.0,
     },
     Board {
-        tag: "ms_lb_2d40_games",
-        title: "2D 40x40 Most Games Finished",
+        tag: "ms_lb_2d40_wins",
+        title: "2D 40x40 Most Wins",
         game_kind: crate::db::KIND_2D,
         dim: 40,
-        kind: BoardKind::MostGames,
+        kind: BoardKind::MostWins,
         facing: Facing::North,
         x: 1104.0,
         y: 75.0,
         z: 1079.0,
     },
     Board {
-        tag: "ms_lb_3d7_games",
-        title: "3D 7x7x7 Most Games Finished",
+        tag: "ms_lb_3d7_wins",
+        title: "3D 7x7x7 Most Wins",
         game_kind: crate::db::KIND_3D,
         dim: 7,
-        kind: BoardKind::MostGames,
+        kind: BoardKind::MostWins,
         facing: Facing::North,
         x: 1117.0,
         y: 75.0,
@@ -175,12 +175,13 @@ fn board_text(board: &Board) -> String {
                 lines.push(format!("§f{}. {} - {}s", i + 1, w.owner_name, w.secs));
             }
         }
-        BoardKind::MostGames => {
-            for (i, w) in crate::db::top_spec_games(board.game_kind, board.dim, 10)
+        BoardKind::MostWins => {
+            for (i, w) in crate::db::top_spec_win_counts(board.game_kind, board.dim, 10)
                 .iter()
                 .enumerate()
             {
-                lines.push(format!("§f{}. {} - {} games", i + 1, w.owner_name, w.games));
+                let label = if w.wins == 1 { "win" } else { "wins" };
+                lines.push(format!("§f{}. {} - {} {}", i + 1, w.owner_name, w.wins, label));
             }
         }
     }
@@ -352,6 +353,20 @@ mod tests {
                 2
             );
         }
+        assert_eq!(
+            BOARDS
+                .iter()
+                .filter(|b| b.kind == BoardKind::FastestWins)
+                .count(),
+            3
+        );
+        assert_eq!(
+            BOARDS
+                .iter()
+                .filter(|b| b.kind == BoardKind::MostWins)
+                .count(),
+            3
+        );
         let mut spots: Vec<_> = BOARDS
             .iter()
             .map(|b| (b.x.to_bits(), b.z.to_bits()))

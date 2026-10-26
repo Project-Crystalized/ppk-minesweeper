@@ -597,39 +597,39 @@ pub fn top_spec_wins(kind: i64, dim: usize, limit: usize) -> Vec<TopWin> {
     with_conn(|c| top_spec_wins_in(c, kind, dim, limit)).unwrap_or_default()
 }
 
-pub struct TopGames {
+pub struct TopWinCount {
     pub owner_name: String,
-    pub games: u64,
+    pub wins: u64,
 }
 
-/// Most finished games (win/loss; abandoned boards do not count, so
-/// create/clear churn cannot inflate the board) for one exact spec.
-pub fn top_spec_games_in(
+/// Most wins for one exact board spec, all-time. Backs the in-world
+/// leaderboard displays.
+pub fn top_spec_win_counts_in(
     conn: &Connection,
     kind: i64,
     dim: usize,
     limit: usize,
-) -> Vec<TopGames> {
+) -> Vec<TopWinCount> {
     let mut stmt = match conn.prepare(
         "SELECT p.name, COUNT(*) \
          FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
-         WHERE g.kind = ? AND g.dim = ? AND g.outcome <> 2 \
+         WHERE g.outcome = 1 AND g.kind = ? AND g.dim = ? \
          GROUP BY g.owner_id ORDER BY COUNT(*) DESC LIMIT ?;",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
     let rows = stmt.query_map(params![kind, dim as i64, limit as i64], |row| {
-        Ok(TopGames {
+        Ok(TopWinCount {
             owner_name: row.get::<_, String>(0)?,
-            games: row.get::<_, i64>(1)? as u64,
+            wins: row.get::<_, i64>(1)? as u64,
         })
     });
     rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
 }
 
-pub fn top_spec_games(kind: i64, dim: usize, limit: usize) -> Vec<TopGames> {
-    with_conn(|c| top_spec_games_in(c, kind, dim, limit)).unwrap_or_default()
+pub fn top_spec_win_counts(kind: i64, dim: usize, limit: usize) -> Vec<TopWinCount> {
+    with_conn(|c| top_spec_win_counts_in(c, kind, dim, limit)).unwrap_or_default()
 }
 
 pub struct TopInfinite {
@@ -786,24 +786,24 @@ mod tests {
     }
 
     #[test]
-    fn spec_games_count_ranks_and_filters() {
+    fn spec_win_counts_rank_and_filter() {
         let (conn, path) = memdb();
-        // "Grinder" finishes three 2D-50 games (any outcome), "Fast" one.
+        // "Grinder" wins two 2D-50 games (plus one loss), "Fast" one.
         record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 3000, OUTCOME_WIN)).unwrap();
         record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 1000, OUTCOME_WIN)).unwrap();
         record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 100, OUTCOME_LOSS)).unwrap();
         record_game_in(&conn, &rec((2, 2), "Fast", KIND_2D, 50, 2000, OUTCOME_WIN)).unwrap();
         record_game_in(&conn, &rec((3, 3), "Cube", KIND_3D, 7, 500, OUTCOME_WIN)).unwrap();
-        let top = top_spec_games_in(&conn, KIND_2D, 50, 10);
+        let top = top_spec_win_counts_in(&conn, KIND_2D, 50, 10);
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].owner_name, "Grinder");
-        assert_eq!(top[0].games, 3);
+        assert_eq!(top[0].wins, 2);
         assert_eq!(top[1].owner_name, "Fast");
-        assert_eq!(top[1].games, 1);
+        assert_eq!(top[1].wins, 1);
         // Other specs never leak in.
-        assert_eq!(top_spec_games_in(&conn, KIND_3D, 7, 10)[0].games, 1);
-        assert!(top_spec_games_in(&conn, KIND_2D, 30, 10).is_empty());
-        assert_eq!(top_spec_games_in(&conn, KIND_2D, 50, 1).len(), 1);
+        assert_eq!(top_spec_win_counts_in(&conn, KIND_3D, 7, 10)[0].wins, 1);
+        assert!(top_spec_win_counts_in(&conn, KIND_2D, 30, 10).is_empty());
+        assert_eq!(top_spec_win_counts_in(&conn, KIND_2D, 50, 1).len(), 1);
         dropdb(&path);
     }
 
@@ -819,11 +819,13 @@ mod tests {
         assert_eq!(records[0].abandoned, 1);
         assert_eq!(records[0].best_secs, None);
         assert_eq!(records[0].avg_secs, None);
-        // Abandoned boards don't rank on the "most games finished" board.
-        assert!(top_spec_games_in(&conn, KIND_2D, 20, 10).is_empty());
-        // A real finish does, and the abandon still doesn't add to it.
+        // Abandoned and lost games don't rank on the "most wins" board.
+        assert!(top_spec_win_counts_in(&conn, KIND_2D, 20, 10).is_empty());
         record_game_in(&conn, &rec(owner, "Quitter", KIND_2D, 20, 400, OUTCOME_LOSS)).unwrap();
-        assert_eq!(top_spec_games_in(&conn, KIND_2D, 20, 10)[0].games, 1);
+        assert!(top_spec_win_counts_in(&conn, KIND_2D, 20, 10).is_empty());
+        // A win does, and abandoned/lost games still don't add to it.
+        record_game_in(&conn, &rec(owner, "Quitter", KIND_2D, 20, 500, OUTCOME_WIN)).unwrap();
+        assert_eq!(top_spec_win_counts_in(&conn, KIND_2D, 20, 10)[0].wins, 1);
         dropdb(&path);
     }
 
