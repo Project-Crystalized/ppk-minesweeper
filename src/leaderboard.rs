@@ -58,17 +58,28 @@ impl Facing {
 }
 
 /// Two rows of three spots in the spawn plaza: south wall at z=1024 (facing
-/// south), north wall at z=1079 (facing north). Four boards fill four spots;
-/// the x=1117 spots are reserved. Edit the numbers to move a board.
-const BOARDS: [Board; 4] = [
+/// south), north wall at z=1079 (facing north). All six spots are filled.
+/// Edit the numbers to move a board.
+const BOARDS: [Board; 6] = [
     Board {
-        tag: "ms_lb_2d50",
-        title: "2D 50x50 All-Time Best",
+        tag: "ms_lb_2d20",
+        title: "2D 20x20 All-Time Best",
         game_kind: crate::db::KIND_2D,
-        dim: 50,
+        dim: 20,
         kind: BoardKind::FastestWins,
         facing: Facing::South,
         x: 1091.0,
+        y: 75.0,
+        z: 1024.0,
+    },
+    Board {
+        tag: "ms_lb_2d40",
+        title: "2D 40x40 All-Time Best",
+        game_kind: crate::db::KIND_2D,
+        dim: 40,
+        kind: BoardKind::FastestWins,
+        facing: Facing::South,
+        x: 1104.0,
         y: 75.0,
         z: 1024.0,
     },
@@ -79,18 +90,29 @@ const BOARDS: [Board; 4] = [
         dim: 7,
         kind: BoardKind::FastestWins,
         facing: Facing::South,
-        x: 1104.0,
+        x: 1117.0,
         y: 75.0,
         z: 1024.0,
     },
     Board {
-        tag: "ms_lb_2d50_games",
-        title: "2D 50x50 Most Games Finished",
+        tag: "ms_lb_2d20_games",
+        title: "2D 20x20 Most Games Finished",
         game_kind: crate::db::KIND_2D,
-        dim: 50,
+        dim: 20,
         kind: BoardKind::MostGames,
         facing: Facing::North,
         x: 1091.0,
+        y: 75.0,
+        z: 1079.0,
+    },
+    Board {
+        tag: "ms_lb_2d40_games",
+        title: "2D 40x40 Most Games Finished",
+        game_kind: crate::db::KIND_2D,
+        dim: 40,
+        kind: BoardKind::MostGames,
+        facing: Facing::North,
+        x: 1104.0,
         y: 75.0,
         z: 1079.0,
     },
@@ -101,7 +123,7 @@ const BOARDS: [Board; 4] = [
         dim: 7,
         kind: BoardKind::MostGames,
         facing: Facing::North,
-        x: 1104.0,
+        x: 1117.0,
         y: 75.0,
         z: 1079.0,
     },
@@ -307,5 +329,35 @@ pub fn refresh(server: &Server) {
     };
     for board in &BOARDS {
         refresh_board(&world, board);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boards_fill_all_six_spots_for_the_three_specs() {
+        assert_eq!(BOARDS.len(), 6);
+        for (kind, dim) in [
+            (crate::db::KIND_2D, 20),
+            (crate::db::KIND_2D, 40),
+            (crate::db::KIND_3D, 7),
+        ] {
+            assert_eq!(
+                BOARDS
+                    .iter()
+                    .filter(|b| b.game_kind == kind && b.dim == dim)
+                    .count(),
+                2
+            );
+        }
+        let mut spots: Vec<_> = BOARDS
+            .iter()
+            .map(|b| (b.x.to_bits(), b.z.to_bits()))
+            .collect();
+        spots.sort_unstable();
+        spots.dedup();
+        assert_eq!(spots.len(), 6);
     }
 }

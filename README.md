@@ -71,20 +71,10 @@ there, bind-mount it over the plugin data folder server-side
 (`mount --bind ~/databases/ms <server>/plugins/data/<plugin>`), then read it
 with `sqlite3` like the other game DBs.
 
-## Leaderboards (text displays)
+## Leaderboards
 
-Four all-time boards as text display entities, refreshed from SQLite every
-60 seconds (plus once ~2s after load), around the spawn plaza of the default
-world (`"world"`, else the first loaded world).
-
-Each board is one gold header on top plus the top-10 lines below it in a
-single text display entity (tags `ms_lb_2d50`, `ms_lb_3d7`, `ms_lb_2d50_games`,
-`ms_lb_3d7_games`). Refresh re-styles and re-texts the tagged keeper, and
-restarts heal without ghosts; positions and facings live in
-`src/leaderboard.rs` (`BOARDS`). Two of the four boards rank most games
-finished for a spec; abandoned boards are stored in `MsGames` but do not
-count there. `/ms top` shows the fastest wins and best infinite streaks in
-chat.
+In-world leaderboards are displayed around the spawn plaza and refresh
+automatically.
 
 The world spawn is world data, not plugin code: it lives in
 `world/level.dat` (`SpawnX/Y/Z`, `SpawnAngle`, plus the `spawn` compound).
