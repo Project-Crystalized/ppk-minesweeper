@@ -290,22 +290,15 @@ pub fn remove_player_games(owner: UuidKey) -> Vec<GameInstance> {
     ids.into_iter().filter_map(remove_game).collect()
 }
 
-pub fn all_games_snapshot() -> Vec<(u32, UuidKey, String, u64, usize, usize, bool)> {
-    lock()
-        .games
-        .iter()
-        .map(|(id, g)| {
-            (
-                *id,
-                g.owner,
-                g.world_id.clone(),
-                g.comp_time_ticks,
-                g.bomb_total(),
-                g.flag_count(),
-                g.is_over,
-            )
-        })
-        .collect()
+/// Advance active game timers by one server tick. A disconnected owner's
+/// timer is paused: the board stays, but time spent offline does not count.
+pub fn advance_game_timers() {
+    let mut s = lock();
+    for g in s.games.values_mut() {
+        if !g.is_over && is_online(g.owner) {
+            g.comp_time_ticks = g.comp_time_ticks.saturating_add(1);
+        }
+    }
 }
 
 /// Snapshot for `/ms list` and the tick action bar.

@@ -16,26 +16,11 @@ pub fn start_tick_task(context: &Context) {
 
 fn tick(server: Server) {
     let now = state::tick_advance();
+    state::advance_game_timers();
     if now % 20 != 0 {
         return;
     }
 
-    // Advance game timers (short critical sections). A disconnected owner's
-    // timer is paused: the board stays, but time spent offline does not count.
-    let ids: Vec<(u32, state::UuidKey)> = state::all_games_snapshot()
-        .iter()
-        .map(|(id, owner, _, _, _, _, _)| (*id, *owner))
-        .collect();
-    for (id, owner) in ids {
-        if !state::is_online(owner) {
-            continue;
-        }
-        state::with_game_mut(id, |g| {
-            if !g.is_over {
-                g.comp_time_ticks += 20;
-            }
-        });
-    }
     state::prune_flag_locks(now);
 
     // Leaderboard cadence, plus once shortly after load.
