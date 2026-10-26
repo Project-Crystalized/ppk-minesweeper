@@ -463,21 +463,6 @@ pub fn session(owner: UuidKey) -> Option<InfiniteSession> {
         .unwrap_or_else(|e| e.into_inner())
         .get(&owner)
         .copied()
-}/// Shared infinite board state: cells that are no longer `Closed`.
-/// Content itself is derived deterministically from coordinates + seed.
-#[derive(Default)]
-pub struct InfiniteBoard {
-    pub cells: HashMap<(i32, i32), crate::core::CellState>,
-}
-
-fn boards() -> &'static Mutex<HashMap<String, InfiniteBoard>> {
-    static BOARDS: OnceLock<Mutex<HashMap<String, InfiniteBoard>>> = OnceLock::new();
-    BOARDS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-pub fn with_infinite_board_mut<R>(world_id: &str, f: impl FnOnce(&mut InfiniteBoard) -> R) -> R {
-    let mut b = boards().lock().unwrap_or_else(|e| e.into_inner());
-    f(b.entry(world_id.to_string()).or_default())
 }
 
 #[cfg(test)]
@@ -632,16 +617,13 @@ mod tests {
     }
 
     #[test]
-    fn infinite_session_and_board_start_empty() {
+    fn infinite_session_starts_empty() {
         let owner = (0xAAA1_0005, 0xBBB1_0005);
         with_session_mut(owner, |s| {
             assert_eq!(
                 (s.current_streak, s.top_streak, s.total_opened, s.bombs_clicked, s.playtime_ticks),
                 (0, 0, 0, 0, 0)
             );
-        });
-        with_infinite_board_mut("test_board_empty", |b| {
-            assert!(b.cells.is_empty());
         });
     }
 }

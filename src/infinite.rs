@@ -1,6 +1,7 @@
 //! Infinite minesweeper: a dedicated flat world where the terrain itself is
-//! the board. Content is derived deterministically from coordinates, opened /
-//! flagged state is shared in memory, streaks are per player.
+//! the board. Hidden content is derived deterministically from coordinates;
+//! opened / flagged state is stored in the world's blocks, streaks are per
+//! player.
 
 use std::{collections::HashSet, sync::OnceLock};
 
@@ -11,8 +12,7 @@ use pumpkin_plugin_api::{
 
 use crate::{
     core::{
-        infinite_is_bomb, infinite_number_at, CellContent, CellState, Pos3,
-        COVERED_BLOCK,
+        infinite_is_bomb, infinite_number_at, CellContent, Pos3, COVERED_BLOCK,
     },
     helpers::{block_is, block_name, is_air, play_sound, set_block, set_tile, tell, to_block_pos, uuid_key, Sound},
     state,
@@ -156,63 +156,56 @@ pub fn handle_break(
         return false;
     }
     let key = uuid_key(player);
+    let pos = Pos3::new(x, y, z);
+    if !is_covered(&block_name(world, to_block_pos(pos))) {
+        return true;
+    }
     let content = content_at(x, z);
 
     enum Outcome {
         Bomb,
         Opened(usize),
-        Ignored,
     }
-    let outcome = state::with_infinite_board_mut(&world.get_id(), |board| {
-        let entry = board.cells.get(&(x, z)).copied().unwrap_or(CellState::Closed);
-        if entry != CellState::Closed {
-            return Outcome::Ignored;
+    let outcome = match content {
+        CellContent::Bomb => {
+            set_tile(world, pos, content);
+            Outcome::Bomb
         }
-        match content {
-            CellContent::Bomb => {
-                board.cells.insert((x, z), CellState::Opened);
-                set_tile(world, Pos3::new(x, y, z), content);
-                Outcome::Bomb
-            }
-            CellContent::Empty => {
-                // Flood fill over empties, bounded per click.
-                let mut opened = 0usize;
-                let mut stack = vec![(x, z)];
-                let mut seen = HashSet::new();
-                while let Some((cx, cz)) = stack.pop() {
-                    if !seen.insert((cx, cz)) {
-                        continue;
-                    }
-                    if opened >= 3000 {
-                        break;
-                    }
-                    let st = board.cells.get(&(cx, cz)).copied().unwrap_or(CellState::Closed);
-                    if st != CellState::Closed {
-                        continue;
-                    }
-                    board.cells.insert((cx, cz), CellState::Opened);
-                    set_tile(world, Pos3::new(cx, BOARD_Y, cz), content_at(cx, cz));
-                    opened += 1;
-                    if content_at(cx, cz) == CellContent::Empty {
-                        for dz in -1..=1 {
-                            for dx in -1..=1 {
-                                stack.push((cx + dx, cz + dz));
-                            }
+        CellContent::Empty => {
+            let mut opened = 0usize;
+            let mut stack = vec![(x, z)];
+            let mut seen = HashSet::new();
+            while let Some((cx, cz)) = stack.pop() {
+                if !seen.insert((cx, cz)) {
+                    continue;
+                }
+                if opened >= 3000 {
+                    break;
+                }
+                let cell_pos = Pos3::new(cx, BOARD_Y, cz);
+                if !is_covered(&block_name(world, to_block_pos(cell_pos))) {
+                    continue;
+                }
+                let cell_content = content_at(cx, cz);
+                set_tile(world, cell_pos, cell_content);
+                opened += 1;
+                if cell_content == CellContent::Empty {
+                    for dz in -1..=1 {
+                        for dx in -1..=1 {
+                            stack.push((cx + dx, cz + dz));
                         }
                     }
                 }
-                Outcome::Opened(opened)
             }
-            CellContent::Number(_) => {
-                board.cells.insert((x, z), CellState::Opened);
-                set_tile(world, Pos3::new(x, y, z), content);
-                Outcome::Opened(1)
-            }
+            Outcome::Opened(opened)
         }
-    });
+        CellContent::Number(_) => {
+            set_tile(world, pos, content);
+            Outcome::Opened(1)
+        }
+    };
 
     match outcome {
-        Outcome::Ignored => true, // swallow breaks on already-open/flagged cells
         Outcome::Bomb => {
             play_sound(world, Pos3::new(x, y, z), Sound::EntityGenericExplode);
             state::with_session_mut(key, |s| {
@@ -299,20 +292,18 @@ pub fn handle_interact(world: &World, player: &Player, x: i32, y: i32, z: i32) -
     let pos = Pos3::new(x, y, z);
     let name = block_name(world, to_block_pos(pos));
     if is_flag_wool(&name) {
-        state::with_infinite_board_mut(&world_id, |board| {
-            board.cells.insert((x, z), CellState::Closed);
-        });
         set_block(world, pos, COVERED_BLOCK);
         play_sound(world, pos, Sound::BlockWoolBreak);
-    } else if block_is(&name, COVERED_BLOCK) {
-        state::with_infinite_board_mut(&world_id, |board| {
-            board.cells.insert((x, z), CellState::Flagged);
-        });
+    } else if is_covered(&name) {
         let flag_block = state::flag_block_for(uuid_key(player));
         set_block(world, pos, flag_block);
         play_sound(world, pos, Sound::BlockWoolPlace);
     }
     true
+}
+
+fn is_covered(name: &str) -> bool {
+    block_is(name, COVERED_BLOCK)
 }
 
 fn is_flag_wool(name: &str) -> bool {
@@ -343,6 +334,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn covered_block_matches_namespaced_and_short_names() {
+        assert!(is_covered("minecraft:moss_block"));
+        assert!(is_covered("moss_block"));
+        assert!(!is_covered("minecraft:red_wool"));
+        assert!(!is_covered("minecraft:tnt"));
     }
 
     #[test]
