@@ -435,7 +435,11 @@ pub fn click_left(
         // the dig are carried over so their state matches their world blocks.
         if needs_first_dig(&game.board) {
             let origin = game.origin();
-            let seed = state::next_rng_seed(game.owner);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let seed = nanos ^ game.owner.0 ^ game.owner.1 ^ u64::from(id);
             let mut rng = TinyRng::new(seed);
             let old = std::mem::take(&mut game.board);
             let mut board = match game.kind {

@@ -118,8 +118,6 @@ fn state() -> &'static Mutex<State> {
 }
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-/// Seed source for board RNGs.
-static RNG_SALT: AtomicU64 = AtomicU64::new(0x9E3779B97F4A7C15);
 
 /// Global tick counter, advanced by the 1-tick scheduler task. Used for
 /// short-term cooldowns (flag debounce).
@@ -220,11 +218,6 @@ pub fn lock_infinite_flag(world_id: &str, x: i32, z: i32, until: u64) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert((world_id.to_string(), x, z), until);
-}
-
-pub fn next_rng_seed(owner: UuidKey) -> u64 {
-    let salt = RNG_SALT.fetch_add(0x9E3779B97F4A7C15, Ordering::Relaxed);
-    salt ^ owner.0 ^ owner.1
 }
 
 fn lock() -> std::sync::MutexGuard<'static, State> {
