@@ -139,7 +139,6 @@ pub fn teleport_here(player: &Player, server: &Server) {
         set_block(&world, pad, COVERED_BLOCK);
     }
     player.teleport((8.5, ty as f64, 8.5), None, None, world);
-    hydrate_session(player);
     tell(player, "Welcome to infinite minesweeper! Open cells, avoid TNT.");
 }
 
@@ -219,16 +218,16 @@ pub fn handle_break(
         }
         Outcome::Opened(n) => {
             play_sound(world, Pos3::new(x, y, z), Sound::EntityFrogStep);
-            let milestone = state::with_session_mut(key, |s| {
+            let (before, after) = state::with_session_mut(key, |s| {
+                let before = s.current_streak;
                 s.total_opened += n;
                 s.current_streak += n;
                 s.top_streak = s.top_streak.max(s.current_streak);
-                s.current_streak
+                (before, s.current_streak)
             });
             persist_session(key, player);
             overlay(player, key);
-            // Broadcast at 500 / 1000 streaks.
-            if milestone == 500 || milestone == 1000 {
+            if let Some(milestone) = crossed_milestone(before, after) {
                 let name = player.get_name();
                 for p in server.get_all_players() {
                     tell(
@@ -312,6 +311,16 @@ fn is_flag_wool(name: &str) -> bool {
         .any(|(_, block)| block_is(name, block))
 }
 
+fn crossed_milestone(before: usize, after: usize) -> Option<usize> {
+    if before < 1000 && after >= 1000 {
+        Some(1000)
+    } else if before < 500 && after >= 500 {
+        Some(500)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +364,18 @@ mod tests {
         assert!(!is_flag_wool("minecraft:moss_block"));
         assert!(!is_flag_wool("minecraft:stone"));
         assert!(!is_flag_wool("minecraft:tnt"));
+    }
+
+    #[test]
+    fn milestone_fires_when_streak_crosses_threshold() {
+        assert_eq!(crossed_milestone(499, 500), Some(500));
+        assert_eq!(crossed_milestone(499, 510), Some(500));
+        assert_eq!(crossed_milestone(0, 499), None);
+        assert_eq!(crossed_milestone(500, 600), None);
+        assert_eq!(crossed_milestone(600, 1000), Some(1000));
+        assert_eq!(crossed_milestone(499, 1000), Some(1000));
+        assert_eq!(crossed_milestone(0, 3000), Some(1000));
+        assert_eq!(crossed_milestone(1000, 1200), None);
     }
 }
 
