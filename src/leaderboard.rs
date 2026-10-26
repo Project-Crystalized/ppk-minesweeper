@@ -1,6 +1,6 @@
 //! In-world leaderboards: one multi-line text display per hardcoded spot,
-//! refreshed from SQLite. Displays are tagged; the first refresh after load
-//! wipes the area and respawns fresh, later refreshes reuse the tagged keeper.
+//! refreshed from SQLite. The first refresh after load wipes and respawns;
+//! later refreshes reuse one keeper and remove duplicates.
 
 use std::{
     collections::HashSet,
@@ -8,8 +8,8 @@ use std::{
 };
 
 use pumpkin_plugin_api::{
-    text::TextComponent, BillboardMode, EntityType, Server, TextAlignment, TextDisplayEntity,
-    TransformationBuilder, World,
+    BillboardMode, Entity, EntityType, Server, TextAlignment, TextDisplayEntity,
+    TransformationBuilder, World, text::TextComponent,
 };
 
 /// Preferred world; falls back to the first loaded world when the server
@@ -193,6 +193,9 @@ fn style_new_display(display: &TextDisplayEntity, facing: Facing) {
 /// are 13 blocks apart, so a 6-block radius never crosses between them.
 const WIPE_DIST2: f64 = 36.0;
 
+/// Squared keeper-search radius (2 blocks).
+const KEEPER_DIST2: f64 = 4.0;
+
 fn dist2(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
     (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)
 }
@@ -208,18 +211,36 @@ fn purge_offsite_tagged(world: &World, tag: &str, pos: (f64, f64, f64)) {
         {
             continue;
         }
-        if dist2(entity.get_position(), pos) > 4.0 {
+        if dist2(entity.get_position(), pos) > KEEPER_DIST2 {
             entity.remove();
         }
     }
 }
 
-/// Remove every text display within [`WIPE_DIST2`] of `pos` whose custom
-/// name is not in `keep`. `keep` empty = boot wipe (removes our own stale
-/// keepers too); live refreshes pass all board tags so only strays die.
-/// Entities in unloaded chunks are invisible here (they arrive with their
-/// chunk, so this re-runs every refresh until the area stays clean).
-fn wipe_area(world: &World, pos: (f64, f64, f64), keep: &[&'static str]) -> usize {
+/// Find this board's closest tagged text display, breaking ties by entity ID.
+fn find_keeper(world: &World, tag: &str, pos: (f64, f64, f64)) -> Option<Entity> {
+    world
+        .get_entities()
+        .into_iter()
+        .filter(|entity| TextDisplayEntity::from_entity(entity).is_some())
+        .filter(|entity| {
+            entity
+                .get_custom_name()
+                .map(|c| c.get_text().to_string())
+                .as_deref()
+                == Some(tag)
+        })
+        .filter(|entity| dist2(entity.get_position(), pos) <= KEEPER_DIST2)
+        .min_by(|a, b| {
+            dist2(a.get_position(), pos)
+                .total_cmp(&dist2(b.get_position(), pos))
+                .then_with(|| a.get_id().cmp(&b.get_id()))
+        })
+}
+
+/// Remove text displays within [`WIPE_DIST2`] of `pos`, except `keep_id`.
+/// `None` removes all of them. Unloaded chunks are handled on a later refresh.
+fn wipe_area(world: &World, pos: (f64, f64, f64), keep_id: Option<u32>) -> usize {
     let mut removed = 0;
     for entity in world.get_entities() {
         if TextDisplayEntity::from_entity(&entity).is_none()
@@ -227,21 +248,13 @@ fn wipe_area(world: &World, pos: (f64, f64, f64), keep: &[&'static str]) -> usiz
         {
             continue;
         }
-        let named = entity.get_custom_name().map(|c| c.get_text().to_string());
-        if named
-            .as_deref()
-            .is_some_and(|n| keep.iter().any(|k| *k == n))
-        {
+        if Some(entity.get_id()) == keep_id {
             continue;
         }
         entity.remove();
         removed += 1;
     }
     removed
-}
-
-fn board_tags() -> Vec<&'static str> {
-    BOARDS.iter().map(|b| b.tag).collect()
 }
 
 fn refresh_board(world: &World, board: &Board) {
@@ -253,20 +266,12 @@ fn refresh_board(world: &World, board: &Board) {
         .unwrap_or_else(|e| e.into_inner())
         .insert(board.tag);
     if forced_fresh {
-        wipe_area(world, pos, &[]);
+        wipe_area(world, pos, None);
         spawn_board_display(world, board, pos, &text);
         return;
     }
-    // Remove strays that surfaced with a late chunk load, then reuse the
-    // tagged keeper.
-    wipe_area(world, pos, &board_tags());
-    let mut keeper = None;
-    for entity in world.get_entities() {
-        if entity.get_custom_name().map(|c| c.get_text()).as_deref() == Some(board.tag) {
-            keeper = Some(entity);
-            break;
-        }
-    }
+    let keeper = find_keeper(world, board.tag, pos);
+    wipe_area(world, pos, keeper.as_ref().map(|entity| entity.get_id()));
     match keeper {
         Some(entity) => {
             if let Some(display) = TextDisplayEntity::from_entity(&entity) {
