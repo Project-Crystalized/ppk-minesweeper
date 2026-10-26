@@ -26,13 +26,9 @@ impl NewGameSpec {
         kind: GameKind::TwoD,
         dim: 20,
     };
-    pub const TWO_D_30: Self = Self {
+    pub const TWO_D_40: Self = Self {
         kind: GameKind::TwoD,
-        dim: 30,
-    };
-    pub const TWO_D_50: Self = Self {
-        kind: GameKind::TwoD,
-        dim: 50,
+        dim: 40,
     };
     pub const THREE_D_5: Self = Self {
         kind: GameKind::ThreeD,

@@ -20,10 +20,10 @@ inside Pumpkin instead of as its own server.
 
 Left-click a cell to open it, right-click toggles a flag with your own color.
 Flagged/open cells ignore left-clicks (flagged bombs can't explode).
-Your starter sticks, lock toggle and flag switcher are pre-placed in the
-hotbar. Lock/unlock with the horse-armor item. Right-click the wool item to
-cycle through 12 flag colors; left-click it to reset to red. Locked games only
-respond to their owner;
+Your starter sticks (20x20, 40x40, 3D 5x5, 3D 7x7), lock toggle and flag
+switcher are pre-placed in the hotbar. Lock/unlock with the horse-armor item.
+Right-click the wool item to cycle through 12 flag colors; left-click it to
+reset to red. Locked games only respond to their owner;
 clicking your own finished board clears it. Boards survive disconnects: the
 owner keeps their progress and helpers can continue unlocked games, while the
 owner's timer is paused until they return. Max 3 active games per player. A

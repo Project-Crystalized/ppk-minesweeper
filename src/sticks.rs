@@ -6,10 +6,9 @@ use pumpkin_plugin_api::{
 
 use crate::games::NewGameSpec;
 
-const STARTERS: [(&str, NewGameSpec); 5] = [
+const STARTERS: [(&str, NewGameSpec); 4] = [
     ("Minesweeper20x20", NewGameSpec::TWO_D_20),
-    ("Minesweeper30x30", NewGameSpec::TWO_D_30),
-    ("Minesweeper50x50", NewGameSpec::TWO_D_50),
+    ("Minesweeper40x40", NewGameSpec::TWO_D_40),
     ("Minesweeper3d5x5", NewGameSpec::THREE_D_5),
     ("Minesweeper3d7x7", NewGameSpec::THREE_D_7),
 ];
@@ -116,9 +115,9 @@ pub const OFFHAND_SLOT: u8 = 40;
 const LOCK_SLOT: u8 = 7;
 const FLAG_SLOT: u8 = 8;
 
-/// Fixed hotbar layout: five starters in slots 0-4, then the lock toggle
-/// and flag color switcher in slots 7-8. Slots 5-6 stay empty.
-fn kit_layout(player: &Player) -> [(u8, ItemStack); 7] {
+/// Fixed hotbar layout: four starters in slots 0-3, then the lock toggle
+/// and flag color switcher in slots 7-8. Slots 4-6 stay empty.
+fn kit_layout(player: &Player) -> [(u8, ItemStack); 6] {
     use crate::helpers::uuid_key;
     let key = uuid_key(player);
     let any_locked = crate::state::all_games_detailed()
@@ -129,7 +128,6 @@ fn kit_layout(player: &Player) -> [(u8, ItemStack); 7] {
         (1, make_stick(STARTERS[1].0)),
         (2, make_stick(STARTERS[2].0)),
         (3, make_stick(STARTERS[3].0)),
-        (4, make_stick(STARTERS[4].0)),
         (LOCK_SLOT, make_lock_item(any_locked)),
         (
             FLAG_SLOT,
@@ -138,7 +136,7 @@ fn kit_layout(player: &Player) -> [(u8, ItemStack); 7] {
     ]
 }
 
-/// Wipe main/armor/offhand, then lay out the 7-piece hotbar kit. Slots 41+
+/// Wipe main/armor/offhand, then lay out the 6-piece hotbar kit. Slots 41+
 /// are never touched (the client would render ghost duplicates there).
 pub fn give_fresh_kit(player: &Player) -> usize {
     player.get_inventory().clear_all();
@@ -173,5 +171,34 @@ pub fn refresh_utility_items(player: &Player) {
         } else if name == FLAG_SWITCH_NAME {
             player.set_inventory_item(slot, Some(make_flag_item(flag_block)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_starter_kit_is_compact_20_40_5_7() {
+        let names: Vec<_> = STARTERS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Minesweeper20x20",
+                "Minesweeper40x40",
+                "Minesweeper3d5x5",
+                "Minesweeper3d7x7",
+            ]
+        );
+        let specs: Vec<_> = STARTERS.iter().map(|(_, spec)| *spec).collect();
+        assert_eq!(
+            specs,
+            vec![
+                NewGameSpec::TWO_D_20,
+                NewGameSpec::TWO_D_40,
+                NewGameSpec::THREE_D_5,
+                NewGameSpec::THREE_D_7,
+            ]
+        );
     }
 }

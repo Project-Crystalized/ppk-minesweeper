@@ -41,7 +41,7 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
         crate::infinite::hydrate_session(&event.player);
         tell(
             &event.player,
-            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-5 and right-click to play, or /ms help. Right-click the wool to cycle flag colors; left-click it to reset to red. Building, breaking and mob spawning are disabled.",
+            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-4 and right-click to play, or /ms help. Right-click the wool to cycle flag colors; left-click it to reset to red. Building, breaking and mob spawning are disabled.",
         );
         event
     }
