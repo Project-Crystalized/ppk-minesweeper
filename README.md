@@ -18,11 +18,12 @@ inside Pumpkin instead of as its own server.
 | `/ms top` | Fastest wins + best infinite streaks (from SQLite) |
 | `/ms infinite` | Teleport to the endless `ms_infinite` world |
 
-Left-click opens a cell, right-click toggles a flag with your own color.
+Left-click a cell to open it, right-click toggles a flag with your own color.
 Flagged/open cells ignore left-clicks (flagged bombs can't explode).
 Your starter sticks, lock toggle and flag switcher are pre-placed in the
-hotbar. Lock and flag color are controlled by right-clicking the horse-armor
-and wool items. Locked games only respond to their owner;
+hotbar. Lock/unlock with the horse-armor item. Right-click the wool item to
+cycle through 12 flag colors; left-click it to reset to red. Locked games only
+respond to their owner;
 clicking your own finished board clears it. Boards survive disconnects: the
 owner keeps their progress and helpers can continue unlocked games, while the
 owner's timer is paused until they return. Max 3 active games per player. A

@@ -12,7 +12,7 @@ use crate::{games::NewGameSpec, helpers::uuid_key, state::GameKind};
 
 fn help_text() -> TextComponent {
     TextComponent::text(&format!(
-        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. Lock/unlock with the horse-armor item and cycle flag color with the wool item. /ms clear removes your games. /ms clearnearest (admin) clears the closest board. /ms stats shows your records. /ms top shows leaderboards. /ms infinite teleports to endless mode.",
+        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. Lock/unlock with the horse-armor item. Right-click the wool item to cycle flag colors; left-click it to reset to red. /ms clear removes your games. /ms clearnearest (admin) clears the closest board. /ms stats shows your records. /ms top shows leaderboards. /ms infinite teleports to endless mode.",
         crate::games::NewGameSpec::all_labels()
     ))
 }

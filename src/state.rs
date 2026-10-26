@@ -378,12 +378,19 @@ pub fn toggle_all_locks(who: UuidKey) -> (usize, bool) {
 }
 
 /// (wool item/block suffix, full block name) in cycle order.
-pub const FLAG_STYLE_ORDER: [(&str, &str); 5] = [
+pub const FLAG_STYLE_ORDER: [(&str, &str); 12] = [
     ("red", "minecraft:red_wool"),
     ("orange", "minecraft:orange_wool"),
     ("yellow", "minecraft:yellow_wool"),
     ("cyan", "minecraft:cyan_wool"),
     ("blue", "minecraft:blue_wool"),
+    ("lime", "minecraft:lime_wool"),
+    ("light_blue", "minecraft:light_blue_wool"),
+    ("purple", "minecraft:purple_wool"),
+    ("magenta", "minecraft:magenta_wool"),
+    ("pink", "minecraft:pink_wool"),
+    ("white", "minecraft:white_wool"),
+    ("black", "minecraft:black_wool"),
 ];
 
 fn flag_styles() -> &'static Mutex<HashMap<UuidKey, usize>> {
@@ -407,6 +414,15 @@ pub fn cycle_flag_style(owner: UuidKey) -> &'static str {
     let next = s.get(&owner).copied().unwrap_or(0) + 1;
     s.insert(owner, next % FLAG_STYLE_ORDER.len());
     FLAG_STYLE_ORDER[next % FLAG_STYLE_ORDER.len()].1
+}
+
+/// Reset to the default red wool.
+pub fn reset_flag_style(owner: UuidKey) -> &'static str {
+    flag_styles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&owner);
+    FLAG_STYLE_ORDER[0].1
 }
 
 /// Short color name ("red", "orange", ...) for item names and messages.
@@ -571,16 +587,28 @@ mod tests {
     }
 
     #[test]
-    fn flag_styles_cycle_five_and_wrap() {
+    fn flag_styles_cycle_all_and_wrap() {
         let owner = (0xAAA1_0004, 0xBBB1_0004);
-        assert_eq!(flag_block_for(owner), "minecraft:red_wool");
-        assert_eq!(flag_style_name(owner), "red");
-        let expected = ["orange", "yellow", "cyan", "blue", "red"];
-        for name in expected {
-            cycle_flag_style(owner);
-            assert_eq!(flag_style_name(owner), name);
+        assert_eq!(flag_block_for(owner), FLAG_STYLE_ORDER[0].1);
+        assert_eq!(flag_style_name(owner), FLAG_STYLE_ORDER[0].0);
+        for (name, block) in FLAG_STYLE_ORDER.iter().skip(1) {
+            assert_eq!(cycle_flag_style(owner), *block);
+            assert_eq!(flag_style_name(owner), *name);
         }
-        assert_eq!(flag_block_for(owner), "minecraft:red_wool");
+        assert_eq!(cycle_flag_style(owner), FLAG_STYLE_ORDER[0].1);
+        assert_eq!(flag_style_name(owner), FLAG_STYLE_ORDER[0].0);
+    }
+
+    #[test]
+    fn flag_style_reset_restores_default() {
+        let owner = (0xAAA1_0005, 0xBBB1_0005);
+        for _ in 0..4 {
+            cycle_flag_style(owner);
+        }
+        assert_ne!(flag_style_name(owner), FLAG_STYLE_ORDER[0].0);
+        assert_eq!(reset_flag_style(owner), FLAG_STYLE_ORDER[0].1);
+        assert_eq!(flag_style_name(owner), FLAG_STYLE_ORDER[0].0);
+        assert_eq!(flag_block_for(owner), FLAG_STYLE_ORDER[0].1);
     }
 
     #[test]

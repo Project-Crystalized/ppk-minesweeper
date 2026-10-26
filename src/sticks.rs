@@ -81,8 +81,14 @@ pub fn make_lock_item(locked: bool) -> ItemStack {
 
 pub fn make_flag_item(flag_block: &str) -> ItemStack {
     let item_name = flag_block.rsplit(':').next().unwrap_or("red_wool");
+    let color = item_name.strip_suffix("_wool").unwrap_or(item_name);
     let stack = ItemStack::of(item_name, 1);
     stack.set_custom_name(Some(TextComponent::text(FLAG_SWITCH_NAME)));
+    stack.set_lore(vec![
+        TextComponent::text(&format!("Current: {}", color.replace('_', " "))),
+        TextComponent::text("Right-click: next color"),
+        TextComponent::text("Left-click: reset to red"),
+    ]);
     stack
 }
 

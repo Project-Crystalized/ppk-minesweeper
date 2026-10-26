@@ -7,7 +7,7 @@ use pumpkin_plugin_api::{
         EntityExplodeEvent, EventData, EventHandler, InteractAction, PlayerInteractEvent,
         PlayerJoinEvent, PlayerLeaveEvent, SpawnerSpawnEvent, TrialSpawnerSpawnEvent,
     },
-    Server,
+    Player, Server,
 };
 
 use crate::{
@@ -16,6 +16,12 @@ use crate::{
     infinite,
     state,
 };
+
+fn reset_flag_color(player: &Player) {
+    crate::state::reset_flag_style(uuid_key(player));
+    tell(player, "Flag color reset to red.");
+    crate::sticks::refresh_utility_items(player);
+}
 
 pub struct JoinListener;
 
@@ -35,7 +41,7 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
         crate::infinite::hydrate_session(&event.player);
         tell(
             &event.player,
-            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-5 and right-click to play, or /ms help. Building, breaking and mob spawning are disabled.",
+            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-5 and right-click to play, or /ms help. Right-click the wool to cycle flag colors; left-click it to reset to red. Building, breaking and mob spawning are disabled.",
         );
         event
     }
@@ -73,6 +79,17 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
         let world = player.get_world();
         let pos = to_pos3(event.block_pos);
 
+        // Bedrock does not fire PlayerInteractEvent for block clicks.
+        if let Some(crate::sticks::HeldSpecial::FlagCycle) =
+            crate::sticks::held_special(player)
+        {
+            reset_flag_color(player);
+            event.cancelled = true;
+            event.should_drop = false;
+            event.exp = 0;
+            return event;
+        }
+
         if let Some((id, idx)) = games::route(pos) {
             // Board clicks never break the underlying block, even when the
             // click itself is a no-op (flagged/open/locked/finished board).
@@ -107,6 +124,17 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
         _server: Server,
         mut event: EventData<PlayerInteractEvent>,
     ) -> EventData<PlayerInteractEvent> {
+        let is_left_click = event.action == InteractAction::LeftClickBlock
+            || event.action == InteractAction::LeftClickAir;
+        if is_left_click {
+            if let Some(crate::sticks::HeldSpecial::FlagCycle) =
+                crate::sticks::held_special(&event.player)
+            {
+                reset_flag_color(&event.player);
+                event.cancelled = true;
+            }
+            return event;
+        }
         let is_right_click = event.action == InteractAction::RightClickBlock
             || event.action == InteractAction::RightClickAir;
         if !is_right_click {
@@ -130,11 +158,13 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
                 }
                 HeldSpecial::FlagCycle => {
                     let key = uuid_key(&event.player);
-                    let block = crate::state::cycle_flag_style(key);
+                    crate::state::cycle_flag_style(key);
                     let name = crate::state::flag_style_name(key);
-                    tell(&event.player, &format!("Flag color: {name}."));
+                    tell(
+                        &event.player,
+                        &format!("Flag color: {name}. Left-click to reset to red."),
+                    );
                     crate::sticks::refresh_utility_items(&event.player);
-                    let _ = block;
                 }
             }
             event.cancelled = true;
