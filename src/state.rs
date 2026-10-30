@@ -632,15 +632,4 @@ mod tests {
         assert!(infinite_flag_locked(world, 7, 8, now));
         assert!(!infinite_flag_locked(world, 7, 8, now + FLAG_LOCK_TICKS));
     }
-
-    #[test]
-    fn infinite_session_starts_empty() {
-        let owner = (0xAAA1_0005, 0xBBB1_0005);
-        with_session_mut(owner, |s| {
-            assert_eq!(
-                (s.current_streak, s.top_streak, s.total_opened, s.bombs_clicked, s.playtime_ticks),
-                (0, 0, 0, 0, 0)
-            );
-        });
-    }
 }

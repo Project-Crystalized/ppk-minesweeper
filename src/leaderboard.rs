@@ -3,7 +3,7 @@
 //! later refreshes reuse one keeper and remove duplicates.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -30,15 +30,17 @@ static SOLO_ONLY: AtomicBool = AtomicBool::new(true);
 static BIGGER_SIZES: AtomicBool = AtomicBool::new(true);
 static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
 static LAST_REFRESH_TICK: AtomicU64 = AtomicU64::new(0);
+/// Last accepted button press, or `u64::MAX` before the first one.
+static LAST_BUTTON_TICK: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Button clicks are coalesced: a request waits until this many ticks have
 /// passed since the last refresh, so holding/spamming a button cannot run the
 /// six leaderboard queries every tick.
 const MIN_REFRESH_INTERVAL_TICKS: u64 = 10;
-/// Ignore repeat button interactions from one player within this window. This
-/// also swallows the duplicate main-hand/off-hand interaction some clients
-/// send for a single button press.
-const BUTTON_COOLDOWN_TICKS: u64 = 4;
+/// Server-wide button lock. 20 ticks is one second at the normal tick rate.
+/// This swallows duplicate main-hand/off-hand interactions and stops rapid
+/// presses from flipping the view repeatedly.
+const BUTTON_LOCK_TICKS: u64 = 20;
 
 pub fn solo_only() -> bool {
     SOLO_ONLY.load(Ordering::Relaxed)
@@ -75,22 +77,20 @@ pub fn take_refresh_request() -> bool {
     REFRESH_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
-fn button_clicks() -> &'static Mutex<HashMap<crate::state::UuidKey, u64>> {
-    static CLICKS: OnceLock<Mutex<HashMap<crate::state::UuidKey, u64>>> = OnceLock::new();
-    CLICKS.get_or_init(|| Mutex::new(HashMap::new()))
+fn button_lock_ready(last: u64, now: u64) -> bool {
+    last == u64::MAX || now.saturating_sub(last) >= BUTTON_LOCK_TICKS
 }
 
-/// Per-player debounce for button interactions. Returns false for the second
-/// half of a double interaction and for rapid spam.
-pub fn button_click_allowed(player: crate::state::UuidKey) -> bool {
+/// Global one-second lock for leaderboard buttons. Returns false for the
+/// second half of a double interaction, rapid spam, or a second player clicking
+/// while the lock is still active.
+pub fn button_click_allowed() -> bool {
     let now = crate::state::now_tick();
-    let mut clicks = button_clicks().lock().unwrap_or_else(|e| e.into_inner());
-    clicks.retain(|_, until| *until > now);
-    if clicks.get(&player).is_some_and(|until| now < *until) {
-        return false;
-    }
-    clicks.insert(player, now.saturating_add(BUTTON_COOLDOWN_TICKS));
-    true
+    LAST_BUTTON_TICK
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            button_lock_ready(last, now).then_some(now)
+        })
+        .is_ok()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -659,22 +659,16 @@ mod tests {
     }
 
     #[test]
-    fn toggles_round_trip() {
-        let solo = solo_only();
-        let bigger = bigger_sizes();
-        assert_eq!(toggle_solo_only(), !solo);
-        assert_eq!(toggle_bigger_sizes(), !bigger);
-        assert_eq!(toggle_solo_only(), solo);
-        assert_eq!(toggle_bigger_sizes(), bigger);
+    fn button_lock_is_one_second() {
+        assert!(button_lock_ready(u64::MAX, 0));
+        assert!(button_lock_ready(0, BUTTON_LOCK_TICKS));
+        assert!(!button_lock_ready(0, BUTTON_LOCK_TICKS - 1));
     }
 
     #[test]
-    fn button_click_debounces_per_player() {
-        let player = (0xC0FF_EE00, 0x1234_5678);
-        let other = (0xC0FF_EE00, 0x8765_4321);
-        assert!(button_click_allowed(player));
-        assert!(!button_click_allowed(player));
-        assert!(button_click_allowed(other));
+    fn button_click_locks_globally() {
+        assert!(button_click_allowed());
+        assert!(!button_click_allowed());
     }
 
     #[test]

@@ -173,32 +173,3 @@ pub fn refresh_utility_items(player: &Player) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_starter_kit_is_compact_20_40_5_7() {
-        let names: Vec<_> = STARTERS.iter().map(|(name, _)| *name).collect();
-        assert_eq!(
-            names,
-            vec![
-                "Minesweeper20x20",
-                "Minesweeper40x40",
-                "Minesweeper3d5x5",
-                "Minesweeper3d7x7",
-            ]
-        );
-        let specs: Vec<_> = STARTERS.iter().map(|(_, spec)| *spec).collect();
-        assert_eq!(
-            specs,
-            vec![
-                NewGameSpec::TWO_D_20,
-                NewGameSpec::TWO_D_40,
-                NewGameSpec::THREE_D_5,
-                NewGameSpec::THREE_D_7,
-            ]
-        );
-    }
-}

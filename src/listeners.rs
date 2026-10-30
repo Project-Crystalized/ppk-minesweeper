@@ -154,9 +154,9 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
                     return event;
                 }
                 // One physical press can produce main-hand + off-hand events,
-                // and a held button can spam. Keep it to one toggle per player
-                // per short window.
-                if !crate::leaderboard::button_click_allowed(uuid_key(&event.player)) {
+                // and a held button can spam. Keep it to one toggle per second
+                // server-wide.
+                if !crate::leaderboard::button_click_allowed() {
                     return event;
                 }
                 match kind {

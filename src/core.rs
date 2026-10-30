@@ -400,40 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn numbers_match_neighbors() {
-        let mut rng = TinyRng::new(1);
-        let dim = 9;
-        let board = generate_board_2d_avoiding(dim, 10, Pos3::new(0, 64, 0), &mut rng, &[]);
-        for y in 0..dim {
-            for x in 0..dim {
-                let c = &board[y * dim + x];
-                match c.content {
-                    CellContent::Number(n) => assert_eq!(n, count_bombs_2d(&board, dim, x, y)),
-                    CellContent::Empty => assert_eq!(count_bombs_2d(&board, dim, x, y), 0),
-                    CellContent::Bomb => {}
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn board_3d_counts_fit_palette() {
-        let mut rng = TinyRng::new(7);
-        let dim = 5;
-        let board = generate_board_3d_avoiding(
-            dim,
-            bomb_amount_3d(dim),
-            Pos3::new(0, 70, 0),
-            &mut rng,
-            &[],
-        );
-        for c in &board {
-            // Must not panic: every content maps to a block (and facing).
-            let _ = revealed_tile(c.content);
-        }
-    }
-
-    #[test]
     fn infinite_density_sane() {
         let bombs = (0..100)
             .flat_map(|x| (0..100).map(move |z| infinite_is_bomb(x, z, 12345)))

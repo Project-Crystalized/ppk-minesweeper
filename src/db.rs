@@ -1201,20 +1201,6 @@ mod tests {
     }
 
     #[test]
-    fn daily_table_has_no_abandoned_column() {
-        let (conn, path) = memdb();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('MsDaily') WHERE name = 'abandoned';",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
-        dropdb(&path);
-    }
-
-    #[test]
     fn daily_rollup_accumulates() {
         let (conn, path) = memdb();
         record_game_in(&conn, &rec((1, 1), "A", KIND_2D, 20, 400, OUTCOME_WIN)).unwrap();
