@@ -3,8 +3,11 @@
 //! later refreshes reuse one keeper and remove duplicates.
 
 use std::{
-    collections::HashSet,
-    sync::{Mutex, OnceLock},
+    collections::{HashMap, HashSet},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 use pumpkin_plugin_api::{
@@ -21,11 +24,96 @@ const LINES_PER_BOARD: usize = 11;
 /// second tick after load (see `tick.rs`).
 pub const REFRESH_TICKS: u64 = 1200;
 
+/// Leaderboard view toggles. Both default to the requested server-start
+/// view: bigger boards and solo games only.
+static SOLO_ONLY: AtomicBool = AtomicBool::new(true);
+static BIGGER_SIZES: AtomicBool = AtomicBool::new(true);
+static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
+static LAST_REFRESH_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Button clicks are coalesced: a request waits until this many ticks have
+/// passed since the last refresh, so holding/spamming a button cannot run the
+/// six leaderboard queries every tick.
+const MIN_REFRESH_INTERVAL_TICKS: u64 = 10;
+/// Ignore repeat button interactions from one player within this window. This
+/// also swallows the duplicate main-hand/off-hand interaction some clients
+/// send for a single button press.
+const BUTTON_COOLDOWN_TICKS: u64 = 4;
+
+pub fn solo_only() -> bool {
+    SOLO_ONLY.load(Ordering::Relaxed)
+}
+
+pub fn bigger_sizes() -> bool {
+    BIGGER_SIZES.load(Ordering::Relaxed)
+}
+
+pub fn toggle_solo_only() -> bool {
+    // `fetch_xor` returns the previous value; the new value is its inverse.
+    !SOLO_ONLY.fetch_xor(true, Ordering::Relaxed)
+}
+
+pub fn toggle_bigger_sizes() -> bool {
+    !BIGGER_SIZES.fetch_xor(true, Ordering::Relaxed)
+}
+
+/// Ask the tick task to refresh on its next pass. Used by button clicks so
+/// the blocking interact event returns without doing six DB queries.
+pub fn request_refresh() {
+    // Release publishes the toggle stores above to the tick thread.
+    REFRESH_REQUESTED.store(true, Ordering::Release);
+}
+
+pub fn take_refresh_request() -> bool {
+    if !REFRESH_REQUESTED.load(Ordering::Acquire) {
+        return false;
+    }
+    let now = crate::state::now_tick();
+    if now.saturating_sub(LAST_REFRESH_TICK.load(Ordering::Relaxed)) < MIN_REFRESH_INTERVAL_TICKS {
+        return false;
+    }
+    REFRESH_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+fn button_clicks() -> &'static Mutex<HashMap<crate::state::UuidKey, u64>> {
+    static CLICKS: OnceLock<Mutex<HashMap<crate::state::UuidKey, u64>>> = OnceLock::new();
+    CLICKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Per-player debounce for button interactions. Returns false for the second
+/// half of a double interaction and for rapid spam.
+pub fn button_click_allowed(player: crate::state::UuidKey) -> bool {
+    let now = crate::state::now_tick();
+    let mut clicks = button_clicks().lock().unwrap_or_else(|e| e.into_inner());
+    clicks.retain(|_, until| *until > now);
+    if clicks.get(&player).is_some_and(|until| now < *until) {
+        return false;
+    }
+    clicks.insert(player, now.saturating_add(BUTTON_COOLDOWN_TICKS));
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonKind {
+    Wooden,
+    Stone,
+}
+
+/// Classify a block name as a wooden or stone button. Names may arrive with
+/// or without the `minecraft:` namespace.
+pub fn button_kind(block_name: &str) -> Option<ButtonKind> {
+    let name = block_name.rsplit(':').next().unwrap_or(block_name);
+    if name == "stone_button" || name == "polished_blackstone_button" {
+        Some(ButtonKind::Stone)
+    } else if name.ends_with("_button") {
+        Some(ButtonKind::Wooden)
+    } else {
+        None
+    }
+}
+
 struct Board {
     tag: &'static str,
-    title: &'static str,
-    game_kind: i64,
-    dim: usize,
     kind: BoardKind,
     facing: Facing,
     x: f64,
@@ -33,10 +121,92 @@ struct Board {
     z: f64,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+/// Snapshot of the two view toggles, taken once per refresh so every board in
+/// the same pass agrees on mode and size.
+#[derive(Clone, Copy)]
+struct BoardView {
+    solo: bool,
+    bigger: bool,
+}
+
+impl BoardView {
+    fn current() -> Self {
+        Self {
+            solo: solo_only(),
+            bigger: bigger_sizes(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum BoardKind {
-    FastestWins,
-    MostWins,
+    InfiniteStreak,
+    InfiniteNet,
+    FastestWins {
+        game_kind: i64,
+        small_dim: usize,
+        big_dim: usize,
+    },
+    MostWins {
+        game_kind: i64,
+        small_dim: usize,
+        big_dim: usize,
+    },
+}
+
+impl BoardKind {
+    fn spec(self, bigger: bool) -> Option<(i64, usize)> {
+        match self {
+            BoardKind::FastestWins {
+                game_kind,
+                small_dim,
+                big_dim,
+            }
+            | BoardKind::MostWins {
+                game_kind,
+                small_dim,
+                big_dim,
+            } => Some((game_kind, if bigger { big_dim } else { small_dim })),
+            BoardKind::InfiniteStreak | BoardKind::InfiniteNet => None,
+        }
+    }
+}
+
+fn mode_label(solo: bool) -> &'static str {
+    if solo { "Solo" } else { "Team" }
+}
+
+fn size_label(kind: i64, dim: usize) -> String {
+    if kind == crate::db::KIND_3D {
+        format!("3D {dim}x{dim}x{dim}")
+    } else {
+        format!("2D {dim}x{dim}")
+    }
+}
+
+impl Board {
+    fn title(&self, view: BoardView) -> String {
+        match self.kind {
+            BoardKind::InfiniteStreak => "Infinite - Highest Streak".to_string(),
+            BoardKind::InfiniteNet => "Infinite - Net Cells Opened".to_string(),
+            BoardKind::FastestWins { .. } => {
+                let (kind, dim) = self.kind.spec(view.bigger).expect("spec board");
+                format!(
+                    "{} {} - Best Time",
+                    size_label(kind, dim),
+                    mode_label(view.solo)
+                )
+            }
+            BoardKind::MostWins { .. } => {
+                let (kind, dim) = self.kind.spec(view.bigger).expect("spec board");
+                format!(
+                    "{} {} - Most Wins",
+                    size_label(kind, dim),
+                    mode_label(view.solo)
+                )
+            }
+        }
+    }
 }
 
 /// Fixed text orientation. The display's default fixed plane faces south
@@ -58,70 +228,71 @@ impl Facing {
 }
 
 /// Two rows of three spots in the spawn plaza: south wall at z=1024 (facing
-/// south), north wall at z=1079 (facing north). All six spots are filled.
+/// south), north wall at z=1079 (facing north). Each column is one mode:
+/// infinite, 2D, then 3D. The stone button swaps the 2D/3D sizes; the wooden
+/// button swaps solo/team for the 2D/3D boards. Infinite is all-player and has
+/// no team or size dimension, so the buttons do not affect it.
 /// Edit the numbers to move a board.
 const BOARDS: [Board; 6] = [
     Board {
-        tag: "ms_lb_2d20",
-        title: "2D 20x20 All-Time Best",
-        game_kind: crate::db::KIND_2D,
-        dim: 20,
-        kind: BoardKind::FastestWins,
+        tag: "ms_lb_inf_streak",
+        kind: BoardKind::InfiniteStreak,
         facing: Facing::South,
         x: 1091.0,
         y: 75.0,
         z: 1024.0,
     },
     Board {
-        tag: "ms_lb_2d40",
-        title: "2D 40x40 All-Time Best",
-        game_kind: crate::db::KIND_2D,
-        dim: 40,
-        kind: BoardKind::FastestWins,
+        tag: "ms_lb_2d_best",
+        kind: BoardKind::FastestWins {
+            game_kind: crate::db::KIND_2D,
+            small_dim: 20,
+            big_dim: 40,
+        },
         facing: Facing::South,
         x: 1104.0,
         y: 75.0,
         z: 1024.0,
     },
     Board {
-        tag: "ms_lb_3d7",
-        title: "3D 7x7x7 All-Time Best",
-        game_kind: crate::db::KIND_3D,
-        dim: 7,
-        kind: BoardKind::FastestWins,
+        tag: "ms_lb_3d_best",
+        kind: BoardKind::FastestWins {
+            game_kind: crate::db::KIND_3D,
+            small_dim: 5,
+            big_dim: 7,
+        },
         facing: Facing::South,
         x: 1117.0,
         y: 75.0,
         z: 1024.0,
     },
     Board {
-        tag: "ms_lb_2d20_wins",
-        title: "2D 20x20 Most Wins",
-        game_kind: crate::db::KIND_2D,
-        dim: 20,
-        kind: BoardKind::MostWins,
+        tag: "ms_lb_inf_cells",
+        kind: BoardKind::InfiniteNet,
         facing: Facing::North,
         x: 1091.0,
         y: 75.0,
         z: 1079.0,
     },
     Board {
-        tag: "ms_lb_2d40_wins",
-        title: "2D 40x40 Most Wins",
-        game_kind: crate::db::KIND_2D,
-        dim: 40,
-        kind: BoardKind::MostWins,
+        tag: "ms_lb_2d_games",
+        kind: BoardKind::MostWins {
+            game_kind: crate::db::KIND_2D,
+            small_dim: 20,
+            big_dim: 40,
+        },
         facing: Facing::North,
         x: 1104.0,
         y: 75.0,
         z: 1079.0,
     },
     Board {
-        tag: "ms_lb_3d7_wins",
-        title: "3D 7x7x7 Most Wins",
-        game_kind: crate::db::KIND_3D,
-        dim: 7,
-        kind: BoardKind::MostWins,
+        tag: "ms_lb_3d_games",
+        kind: BoardKind::MostWins {
+            game_kind: crate::db::KIND_3D,
+            small_dim: 5,
+            big_dim: 7,
+        },
         facing: Facing::North,
         x: 1117.0,
         y: 75.0,
@@ -158,30 +329,45 @@ fn board_world(server: &Server) -> Option<World> {
         );
         return Some(world);
     }
-    warn_once("no-world", "leaderboard: no loaded world to place displays in");
+    warn_once(
+        "no-world",
+        "leaderboard: no loaded world to place displays in",
+    );
     None
 }
 
 /// Rendered text block for one board: gold header plus top 10 lines, with
 /// placeholders filling the tail so the display keeps its size.
-fn board_text(board: &Board) -> String {
-    let mut lines = vec![format!("§6§l{}", board.title)];
+fn board_text(board: &Board, view: BoardView) -> String {
+    let mut lines = vec![format!("§6§l{}", board.title(view))];
     match board.kind {
-        BoardKind::FastestWins => {
-            for (i, w) in crate::db::top_spec_wins(board.game_kind, board.dim, 10)
+        BoardKind::InfiniteStreak => {
+            for (i, t) in crate::db::top_infinite(10).iter().enumerate() {
+                lines.push(format!("§f{}. {} - {}", i + 1, t.name, t.top));
+            }
+        }
+        BoardKind::InfiniteNet => {
+            for (i, t) in crate::db::top_infinite_net(10).iter().enumerate() {
+                lines.push(format!("§f{}. {} - {}", i + 1, t.name, t.net()));
+            }
+        }
+        BoardKind::FastestWins { game_kind, .. } => {
+            let dim = board.kind.spec(view.bigger).expect("spec board").1;
+            for (i, w) in crate::db::top_spec_wins(game_kind, dim, view.solo, 10)
                 .iter()
                 .enumerate()
             {
-                lines.push(format!("§f{}. {} - {}s", i + 1, w.owner_name, w.secs));
+                lines.push(format!("§f{}. {} - {}s", i + 1, w.name, w.secs));
             }
         }
-        BoardKind::MostWins => {
-            for (i, w) in crate::db::top_spec_win_counts(board.game_kind, board.dim, 10)
+        BoardKind::MostWins { game_kind, .. } => {
+            let dim = board.kind.spec(view.bigger).expect("spec board").1;
+            for (i, w) in crate::db::top_spec_win_counts(game_kind, dim, view.solo, 10)
                 .iter()
                 .enumerate()
             {
                 let label = if w.wins == 1 { "win" } else { "wins" };
-                lines.push(format!("§f{}. {} - {} {}", i + 1, w.owner_name, w.wins, label));
+                lines.push(format!("§f{}. {} - {} {}", i + 1, w.name, w.wins, label));
             }
         }
     }
@@ -204,7 +390,9 @@ fn style_new_display(display: &TextDisplayEntity, facing: Facing) {
     display.get_display().set_billboard(BillboardMode::Fixed);
     let (x, y, z, w) = facing.quaternion();
     display.get_display().set_transformation(
-        TransformationBuilder::new().left_rotation(x, y, z, w).build(),
+        TransformationBuilder::new()
+            .left_rotation(x, y, z, w)
+            .build(),
     );
     // Full-light override: the sampled light can be near zero (covered spots),
     // so set both light nibbles to 15.
@@ -280,9 +468,9 @@ fn wipe_area(world: &World, pos: (f64, f64, f64), keep_id: Option<u32>) -> usize
     removed
 }
 
-fn refresh_board(world: &World, board: &Board) {
+fn refresh_board(world: &World, board: &Board, view: BoardView) {
     let pos = (board.x, board.y, board.z);
-    let text = board_text(board);
+    let text = board_text(board, view);
     purge_offsite_tagged(world, board.tag, pos);
     let forced_fresh = fresh_cycle()
         .lock()
@@ -310,7 +498,6 @@ fn refresh_board(world: &World, board: &Board) {
     }
 }
 
-
 fn spawn_board_display(world: &World, board: &Board, pos: (f64, f64, f64), text: &str) {
     let entity = world.spawn_entity(EntityType::TextDisplay, pos);
     entity.set_custom_name(TextComponent::text(board.tag));
@@ -328,8 +515,10 @@ pub fn refresh(server: &Server) {
     let Some(world) = board_world(server) else {
         return;
     };
+    LAST_REFRESH_TICK.store(crate::state::now_tick(), Ordering::Relaxed);
+    let view = BoardView::current();
     for board in &BOARDS {
-        refresh_board(&world, board);
+        refresh_board(&world, board, view);
     }
 }
 
@@ -338,35 +527,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn boards_fill_all_six_spots_for_the_three_specs() {
+    fn boards_cover_the_six_requested_spots() {
         assert_eq!(BOARDS.len(), 6);
-        for (kind, dim) in [
-            (crate::db::KIND_2D, 20),
-            (crate::db::KIND_2D, 40),
-            (crate::db::KIND_3D, 7),
-        ] {
+        assert_eq!(
+            BOARDS
+                .iter()
+                .filter(|b| b.kind == BoardKind::InfiniteStreak)
+                .count(),
+            1
+        );
+        assert_eq!(
+            BOARDS
+                .iter()
+                .filter(|b| b.kind == BoardKind::InfiniteNet)
+                .count(),
+            1
+        );
+        assert_eq!(
+            BOARDS
+                .iter()
+                .filter(|b| matches!(b.kind, BoardKind::FastestWins { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            BOARDS
+                .iter()
+                .filter(|b| matches!(b.kind, BoardKind::MostWins { .. }))
+                .count(),
+            2
+        );
+        for kind in [crate::db::KIND_2D, crate::db::KIND_3D] {
             assert_eq!(
                 BOARDS
                     .iter()
-                    .filter(|b| b.game_kind == kind && b.dim == dim)
+                    .filter(|b| matches!(
+                        b.kind,
+                        BoardKind::FastestWins { game_kind, .. } if game_kind == kind
+                    ))
                     .count(),
-                2
+                1
+            );
+            assert_eq!(
+                BOARDS
+                    .iter()
+                    .filter(|b| matches!(
+                        b.kind,
+                        BoardKind::MostWins { game_kind, .. } if game_kind == kind
+                    ))
+                    .count(),
+                1
             );
         }
-        assert_eq!(
-            BOARDS
-                .iter()
-                .filter(|b| b.kind == BoardKind::FastestWins)
-                .count(),
-            3
-        );
-        assert_eq!(
-            BOARDS
-                .iter()
-                .filter(|b| b.kind == BoardKind::MostWins)
-                .count(),
-            3
-        );
         let mut spots: Vec<_> = BOARDS
             .iter()
             .map(|b| (b.x.to_bits(), b.z.to_bits()))
@@ -374,5 +586,113 @@ mod tests {
         spots.sort_unstable();
         spots.dedup();
         assert_eq!(spots.len(), 6);
+    }
+
+    #[test]
+    fn size_toggle_switches_both_specs() {
+        for board in BOARDS {
+            match board.kind {
+                BoardKind::FastestWins {
+                    game_kind,
+                    small_dim,
+                    big_dim,
+                }
+                | BoardKind::MostWins {
+                    game_kind,
+                    small_dim,
+                    big_dim,
+                } => {
+                    assert_eq!(board.kind.spec(false), Some((game_kind, small_dim)));
+                    assert_eq!(board.kind.spec(true), Some((game_kind, big_dim)));
+                }
+                BoardKind::InfiniteStreak | BoardKind::InfiniteNet => {
+                    assert_eq!(board.kind.spec(false), None);
+                    assert_eq!(board.kind.spec(true), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn infinite_titles_are_explicit() {
+        let streak = BOARDS
+            .iter()
+            .find(|b| b.kind == BoardKind::InfiniteStreak)
+            .unwrap();
+        let view = BoardView {
+            solo: true,
+            bigger: true,
+        };
+        assert_eq!(streak.title(view), "Infinite - Highest Streak");
+        let net = BOARDS
+            .iter()
+            .find(|b| b.kind == BoardKind::InfiniteNet)
+            .unwrap();
+        assert_eq!(net.title(view), "Infinite - Net Cells Opened");
+    }
+
+    #[test]
+    fn titles_use_the_refresh_snapshot() {
+        let board = BOARDS
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.kind,
+                    BoardKind::FastestWins { game_kind, .. } if game_kind == crate::db::KIND_2D
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            board.title(BoardView {
+                solo: false,
+                bigger: false,
+            }),
+            "2D 20x20 Team - Best Time"
+        );
+        assert_eq!(
+            board.title(BoardView {
+                solo: true,
+                bigger: true,
+            }),
+            "2D 40x40 Solo - Best Time"
+        );
+    }
+
+    #[test]
+    fn toggles_round_trip() {
+        let solo = solo_only();
+        let bigger = bigger_sizes();
+        assert_eq!(toggle_solo_only(), !solo);
+        assert_eq!(toggle_bigger_sizes(), !bigger);
+        assert_eq!(toggle_solo_only(), solo);
+        assert_eq!(toggle_bigger_sizes(), bigger);
+    }
+
+    #[test]
+    fn button_click_debounces_per_player() {
+        let player = (0xC0FF_EE00, 0x1234_5678);
+        let other = (0xC0FF_EE00, 0x8765_4321);
+        assert!(button_click_allowed(player));
+        assert!(!button_click_allowed(player));
+        assert!(button_click_allowed(other));
+    }
+
+    #[test]
+    fn button_names_are_classified() {
+        for name in [
+            "oak_button",
+            "minecraft:spruce_button",
+            "bamboo_button",
+            "crimson_button",
+            "pale_oak_button",
+        ] {
+            assert_eq!(button_kind(name), Some(ButtonKind::Wooden), "{name}");
+        }
+        for name in ["stone_button", "minecraft:polished_blackstone_button"] {
+            assert_eq!(button_kind(name), Some(ButtonKind::Stone), "{name}");
+        }
+        for name in ["oak_planks", "stone", "moss_block"] {
+            assert_eq!(button_kind(name), None, "{name}");
+        }
     }
 }

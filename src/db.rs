@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::state::UuidKey;
 
@@ -21,7 +21,6 @@ pub const KIND_3D: i64 = 1;
 
 pub const OUTCOME_LOSS: i64 = 0;
 pub const OUTCOME_WIN: i64 = 1;
-pub const OUTCOME_ABANDONED: i64 = 2;
 
 /// Fail-soft latch: once setup (or the directory) proves broken, every op
 /// becomes a no-op instead of logging on every click.
@@ -101,7 +100,6 @@ fn setup_in(conn: &Connection) -> rusqlite::Result<()> {
         "first_seen INTEGER NOT NULL,",
         "last_seen INTEGER NOT NULL,",
         "playtime_ticks INTEGER NOT NULL DEFAULT 0);",
-
         "CREATE TABLE IF NOT EXISTS MsGames(",
         "game_id INTEGER PRIMARY KEY,",
         "owner_id INTEGER NOT NULL REFERENCES MsPlayers(player_id),",
@@ -119,14 +117,12 @@ fn setup_in(conn: &Connection) -> rusqlite::Result<()> {
         "locked INTEGER NOT NULL,",
         "ended INTEGER NOT NULL,",
         "x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL);",
-
         "CREATE INDEX IF NOT EXISTS MsGames_wins ",
         "ON MsGames(kind, dim, time_ticks) WHERE outcome = 1;",
         "CREATE INDEX IF NOT EXISTS MsGames_games ",
         "ON MsGames(kind, dim, owner_id);",
         "CREATE INDEX IF NOT EXISTS MsGames_owner ",
         "ON MsGames(owner_id, kind, dim);",
-
         "CREATE TABLE IF NOT EXISTS MsGamePlayers(",
         "game_id INTEGER NOT NULL REFERENCES MsGames(game_id) ON DELETE CASCADE,",
         "player_id INTEGER NOT NULL REFERENCES MsPlayers(player_id),",
@@ -134,7 +130,6 @@ fn setup_in(conn: &Connection) -> rusqlite::Result<()> {
         "PRIMARY KEY(game_id, player_id));",
         "CREATE INDEX IF NOT EXISTS MsGamePlayers_player ",
         "ON MsGamePlayers(player_id);",
-
         "CREATE TABLE IF NOT EXISTS MsInfiniteStats(",
         "player_id INTEGER PRIMARY KEY REFERENCES MsPlayers(player_id),",
         "top_streak INTEGER NOT NULL,",
@@ -142,12 +137,10 @@ fn setup_in(conn: &Connection) -> rusqlite::Result<()> {
         "bombs_clicked INTEGER NOT NULL,",
         "playtime_ticks INTEGER NOT NULL DEFAULT 0,",
         "last_played INTEGER NOT NULL);",
-
         "CREATE TABLE IF NOT EXISTS MsDaily(",
         "day INTEGER PRIMARY KEY,",
         "games INTEGER NOT NULL,",
         "wins INTEGER NOT NULL,",
-        "abandoned INTEGER NOT NULL,",
         "opened INTEGER NOT NULL,",
         "flags INTEGER NOT NULL,",
         "time_ticks INTEGER NOT NULL);",
@@ -275,10 +268,10 @@ fn kind_label(kind: i64) -> &'static str {
 }
 
 fn outcome_label(outcome: i64) -> &'static str {
-    match outcome {
-        OUTCOME_WIN => "win",
-        OUTCOME_ABANDONED => "abandoned",
-        _ => "loss",
+    if outcome == OUTCOME_WIN {
+        "win"
+    } else {
+        "loss"
     }
 }
 
@@ -328,18 +321,16 @@ fn record_game_in(conn: &Connection, r: &GameRecord<'_>) -> rusqlite::Result<()>
         }
     }
     tx.execute(
-        "INSERT INTO MsDaily(day, games, wins, abandoned, opened, flags, time_ticks) \
-         VALUES(unixepoch() / 86400, 1, ?, ?, ?, ?, ?) \
+        "INSERT INTO MsDaily(day, games, wins, opened, flags, time_ticks) \
+         VALUES(unixepoch() / 86400, 1, ?, ?, ?, ?) \
          ON CONFLICT(day) DO UPDATE SET \
            games = games + 1, \
            wins = wins + excluded.wins, \
-           abandoned = abandoned + excluded.abandoned, \
            opened = opened + excluded.opened, \
            flags = flags + excluded.flags, \
            time_ticks = time_ticks + excluded.time_ticks;",
         params![
             (r.outcome == OUTCOME_WIN) as i64,
-            (r.outcome == OUTCOME_ABANDONED) as i64,
             r.opened as i64,
             r.flags_placed as i64,
             r.time_ticks as i64,
@@ -447,8 +438,6 @@ pub struct SpecRecord {
     pub dim: usize,
     pub games: usize,
     pub wins: usize,
-    /// Games dropped unfinished (`/ms clear`, leave).
-    pub abandoned: usize,
     pub best_secs: Option<u64>,
     pub avg_secs: Option<u64>,
     pub opened: u64,
@@ -456,13 +445,14 @@ pub struct SpecRecord {
     pub bombs: u64,
 }
 
-/// Per-spec history: games (any outcome), wins, abandoned count, fastest win,
-/// average finished-game duration, and cumulative opened/flags/bombs.
+/// Per-spec history: games (any outcome), wins, fastest win, average winning
+/// time, and cumulative opened/flags/bombs. Losses, including abandoned games,
+/// never contribute to the average.
 pub fn spec_records_in(conn: &Connection, owner: UuidKey) -> Vec<SpecRecord> {
     let mut stmt = match conn.prepare(
-        "SELECT kind, dim, COUNT(*), SUM(outcome = 1), SUM(outcome = 2), \
+        "SELECT kind, dim, COUNT(*), SUM(outcome = 1), \
            MIN(CASE WHEN outcome = 1 THEN time_ticks END), \
-           AVG(CASE WHEN outcome <> 2 THEN time_ticks END), \
+           AVG(CASE WHEN outcome = 1 THEN time_ticks END), \
            COALESCE(SUM(opened), 0), COALESCE(SUM(flags_placed), 0), \
            COALESCE(SUM(bombs), 0) \
          FROM MsGames \
@@ -478,19 +468,17 @@ pub fn spec_records_in(conn: &Connection, owner: UuidKey) -> Vec<SpecRecord> {
             dim: row.get::<_, i64>(1)? as usize,
             games: row.get::<_, i64>(2)? as usize,
             wins: row.get::<_, i64>(3)? as usize,
-            abandoned: row.get::<_, i64>(4)? as usize,
-            best_secs: row
-                .get::<_, Option<i64>>(5)?
-                .map(|t| t as u64 / 20),
+            best_secs: row.get::<_, Option<i64>>(4)?.map(|t| t as u64 / 20),
             avg_secs: row
-                .get::<_, Option<f64>>(6)?
+                .get::<_, Option<f64>>(5)?
                 .map(|t| (t / 20.0).round() as u64),
-            opened: row.get::<_, i64>(7)? as u64,
-            flags: row.get::<_, i64>(8)? as u64,
-            bombs: row.get::<_, i64>(9)? as u64,
+            opened: row.get::<_, i64>(6)? as u64,
+            flags: row.get::<_, i64>(7)? as u64,
+            bombs: row.get::<_, i64>(8)? as u64,
         })
     });
-    rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
+    rows.map(|r| r.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
 }
 
 pub fn spec_records(owner: UuidKey) -> Vec<SpecRecord> {
@@ -525,7 +513,8 @@ pub fn helper_record(owner: UuidKey) -> HelperRecord {
 }
 
 pub struct TopWin {
-    pub owner_name: String,
+    /// Player name for solo wins, or `owner, helper, ...` for team wins.
+    pub name: String,
     pub kind: i64,
     pub dim: usize,
     pub secs: u64,
@@ -533,7 +522,7 @@ pub struct TopWin {
 
 fn map_top_win(row: &rusqlite::Row<'_>) -> rusqlite::Result<TopWin> {
     Ok(TopWin {
-        owner_name: row.get::<_, String>(0)?,
+        name: row.get::<_, String>(0)?,
         kind: row.get::<_, i64>(1)?,
         dim: row.get::<_, i64>(2)? as usize,
         secs: row.get::<_, i64>(3)? as u64 / 20,
@@ -547,14 +536,14 @@ pub fn top_wins_in(conn: &Connection, kind: Option<i64>, limit: usize) -> Vec<To
              FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
              WHERE g.outcome = 1 AND g.kind = ? \
              GROUP BY g.owner_id, g.kind, g.dim \
-             ORDER BY MIN(g.time_ticks) ASC LIMIT ?;"
+             ORDER BY MIN(g.time_ticks) ASC, p.name ASC LIMIT ?;"
         }
         None => {
             "SELECT p.name, g.kind, g.dim, MIN(g.time_ticks) \
              FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
              WHERE g.outcome = 1 \
              GROUP BY g.owner_id, g.kind, g.dim \
-             ORDER BY MIN(g.time_ticks) ASC LIMIT ?;"
+             ORDER BY MIN(g.time_ticks) ASC, p.name ASC LIMIT ?;"
         }
     };
     let mut stmt = match conn.prepare(sql) {
@@ -565,46 +554,142 @@ pub fn top_wins_in(conn: &Connection, kind: Option<i64>, limit: usize) -> Vec<To
         Some(k) => stmt.query_map(params![k, limit as i64], map_top_win),
         None => stmt.query_map(params![limit as i64], map_top_win),
     };
-    rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
+    rows.map(|r| r.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
 }
 
 pub fn top_wins(kind: Option<i64>, limit: usize) -> Vec<TopWin> {
     with_conn(|c| top_wins_in(c, kind, limit)).unwrap_or_default()
 }
 
-/// Fastest wins for one exact board spec, all-time. Backs the in-world
-/// leaderboard displays.
-pub fn top_spec_wins_in(
-    conn: &Connection,
-    kind: i64,
-    dim: usize,
-    limit: usize,
-) -> Vec<TopWin> {
+fn top_spec_solo_wins_in(conn: &Connection, kind: i64, dim: usize, limit: usize) -> Vec<TopWin> {
     let mut stmt = match conn.prepare(
         "SELECT p.name, g.kind, g.dim, MIN(g.time_ticks) \
          FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
-         WHERE g.outcome = 1 AND g.kind = ? AND g.dim = ? \
-         GROUP BY g.owner_id ORDER BY MIN(g.time_ticks) ASC LIMIT ?;",
+         WHERE g.outcome = 1 AND g.kind = ? AND g.dim = ? AND g.helpers = 0 \
+         GROUP BY g.owner_id \
+         ORDER BY MIN(g.time_ticks) ASC, p.name ASC LIMIT ?;",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
     let rows = stmt.query_map(params![kind, dim as i64, limit as i64], map_top_win);
-    rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
+    rows.map(|r| r.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
 }
 
-pub fn top_spec_wins(kind: i64, dim: usize, limit: usize) -> Vec<TopWin> {
-    with_conn(|c| top_spec_wins_in(c, kind, dim, limit)).unwrap_or_default()
+fn roster_names(conn: &Connection, game_id: i64) -> Option<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.name \
+             FROM MsGamePlayers gp \
+             JOIN MsPlayers p ON p.player_id = gp.player_id \
+             WHERE gp.game_id = ? \
+             ORDER BY gp.is_owner DESC, p.name ASC;",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map(params![game_id], |row| row.get::<_, String>(0))
+        .ok()?;
+    let names: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
+}
+
+/// Fastest team wins for one exact board spec, all-time. Each row is one
+/// distinct roster (owner + helpers) with that roster's fastest win.
+fn top_spec_team_wins_in(conn: &Connection, kind: i64, dim: usize, limit: usize) -> Vec<TopWin> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut stmt = match conn.prepare(
+        "WITH team_wins AS ( \
+             SELECT g.game_id, g.time_ticks, \
+                    (SELECT GROUP_CONCAT(player_id, ',' ORDER BY player_id) \
+                     FROM MsGamePlayers gp \
+                     WHERE gp.game_id = g.game_id) AS roster_key \
+             FROM MsGames g \
+             WHERE g.outcome = 1 AND g.kind = ? AND g.dim = ? AND g.helpers > 0 \
+         ), \
+         best AS ( \
+             SELECT game_id, time_ticks, \
+                    ROW_NUMBER() OVER ( \
+                        PARTITION BY roster_key \
+                        ORDER BY time_ticks ASC, game_id ASC \
+                    ) AS rn \
+             FROM team_wins \
+         ) \
+         SELECT game_id, time_ticks \
+         FROM best \
+         WHERE rn = 1 \
+         ORDER BY time_ticks ASC, game_id ASC \
+         LIMIT ?;",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map(params![kind, dim as i64, limit as i64], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    }) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for row in rows {
+        let Ok((game_id, ticks)) = row else {
+            continue;
+        };
+        let Some(names) = roster_names(conn, game_id) else {
+            continue;
+        };
+        out.push(TopWin {
+            name: names,
+            kind,
+            dim,
+            secs: ticks as u64 / 20,
+        });
+    }
+    out
+}
+
+/// Fastest wins for one exact board spec, all-time. Backs the in-world
+/// leaderboard displays. Solo rows show the player; team rows show the full
+/// roster that set the time.
+pub fn top_spec_wins_in(
+    conn: &Connection,
+    kind: i64,
+    dim: usize,
+    solo_only: bool,
+    limit: usize,
+) -> Vec<TopWin> {
+    if solo_only {
+        top_spec_solo_wins_in(conn, kind, dim, limit)
+    } else {
+        top_spec_team_wins_in(conn, kind, dim, limit)
+    }
+}
+
+pub fn top_spec_wins(kind: i64, dim: usize, solo_only: bool, limit: usize) -> Vec<TopWin> {
+    with_conn(|c| top_spec_wins_in(c, kind, dim, solo_only, limit)).unwrap_or_default()
 }
 
 pub struct TopWinCount {
-    pub owner_name: String,
+    pub name: String,
     pub wins: u64,
 }
 
-/// Most wins for one exact board spec, all-time. Backs the in-world
-/// leaderboard displays.
-pub fn top_spec_win_counts_in(
+fn map_top_win_count(row: &rusqlite::Row<'_>) -> rusqlite::Result<TopWinCount> {
+    Ok(TopWinCount {
+        name: row.get::<_, String>(0)?,
+        wins: row.get::<_, i64>(1)? as u64,
+    })
+}
+
+fn top_spec_solo_win_counts_in(
     conn: &Connection,
     kind: i64,
     dim: usize,
@@ -613,36 +698,86 @@ pub fn top_spec_win_counts_in(
     let mut stmt = match conn.prepare(
         "SELECT p.name, COUNT(*) \
          FROM MsGames g JOIN MsPlayers p ON p.player_id = g.owner_id \
-         WHERE g.outcome = 1 AND g.kind = ? AND g.dim = ? \
-         GROUP BY g.owner_id ORDER BY COUNT(*) DESC LIMIT ?;",
+         WHERE g.outcome = 1 AND g.kind = ? AND g.dim = ? AND g.helpers = 0 \
+         GROUP BY g.owner_id \
+         ORDER BY COUNT(*) DESC, p.name ASC LIMIT ?;",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = stmt.query_map(params![kind, dim as i64, limit as i64], |row| {
-        Ok(TopWinCount {
-            owner_name: row.get::<_, String>(0)?,
-            wins: row.get::<_, i64>(1)? as u64,
-        })
-    });
-    rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
+    let rows = stmt.query_map(params![kind, dim as i64, limit as i64], map_top_win_count);
+    rows.map(|r| r.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
 }
 
-pub fn top_spec_win_counts(kind: i64, dim: usize, limit: usize) -> Vec<TopWinCount> {
-    with_conn(|c| top_spec_win_counts_in(c, kind, dim, limit)).unwrap_or_default()
+fn top_spec_team_win_counts_in(
+    conn: &Connection,
+    kind: i64,
+    dim: usize,
+    limit: usize,
+) -> Vec<TopWinCount> {
+    let mut stmt = match conn.prepare(
+        "SELECT p.name, COUNT(DISTINCT g.game_id) \
+         FROM MsGames g \
+         JOIN MsGamePlayers gp ON gp.game_id = g.game_id \
+         JOIN MsPlayers p ON p.player_id = gp.player_id \
+         WHERE g.outcome = 1 AND g.kind = ? AND g.dim = ? AND g.helpers > 0 \
+         GROUP BY gp.player_id \
+         ORDER BY COUNT(DISTINCT g.game_id) DESC, p.name ASC LIMIT ?;",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(params![kind, dim as i64, limit as i64], map_top_win_count);
+    rows.map(|r| r.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Most wins for one exact board spec, all-time. Losses do not count. Solo
+/// boards rank owners; team boards credit every participant for each team win.
+pub fn top_spec_win_counts_in(
+    conn: &Connection,
+    kind: i64,
+    dim: usize,
+    solo_only: bool,
+    limit: usize,
+) -> Vec<TopWinCount> {
+    if solo_only {
+        top_spec_solo_win_counts_in(conn, kind, dim, limit)
+    } else {
+        top_spec_team_win_counts_in(conn, kind, dim, limit)
+    }
+}
+
+pub fn top_spec_win_counts(
+    kind: i64,
+    dim: usize,
+    solo_only: bool,
+    limit: usize,
+) -> Vec<TopWinCount> {
+    with_conn(|c| top_spec_win_counts_in(c, kind, dim, solo_only, limit)).unwrap_or_default()
 }
 
 pub struct TopInfinite {
     pub name: String,
     pub top: usize,
     pub opened: usize,
+    pub bombs_clicked: usize,
+}
+
+impl TopInfinite {
+    /// Cells opened minus bombs clicked: the fair infinite total.
+    pub fn net(&self) -> i64 {
+        self.opened as i64 - self.bombs_clicked as i64
+    }
 }
 
 pub fn top_infinite_in(conn: &Connection, limit: usize) -> Vec<TopInfinite> {
     let mut stmt = match conn.prepare(
-        "SELECT p.name, s.top_streak, s.total_opened \
+        "SELECT p.name, s.top_streak, s.total_opened, s.bombs_clicked \
          FROM MsInfiniteStats s JOIN MsPlayers p ON p.player_id = s.player_id \
-         ORDER BY s.top_streak DESC, s.total_opened DESC LIMIT ?;",
+         ORDER BY s.top_streak DESC, \
+           (s.total_opened - s.bombs_clicked) DESC, p.name ASC LIMIT ?;",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -652,13 +787,41 @@ pub fn top_infinite_in(conn: &Connection, limit: usize) -> Vec<TopInfinite> {
             name: row.get::<_, String>(0)?,
             top: row.get::<_, i64>(1)? as usize,
             opened: row.get::<_, i64>(2)? as usize,
+            bombs_clicked: row.get::<_, i64>(3)? as usize,
         })
     });
-    rows.map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default()
+    rows.map(|r| r.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
 }
 
 pub fn top_infinite(limit: usize) -> Vec<TopInfinite> {
     with_conn(|c| top_infinite_in(c, limit)).unwrap_or_default()
+}
+
+pub fn top_infinite_net_in(conn: &Connection, limit: usize) -> Vec<TopInfinite> {
+    let mut stmt = match conn.prepare(
+        "SELECT p.name, s.top_streak, s.total_opened, s.bombs_clicked \
+         FROM MsInfiniteStats s JOIN MsPlayers p ON p.player_id = s.player_id \
+         ORDER BY (s.total_opened - s.bombs_clicked) DESC, \
+           s.top_streak DESC, p.name ASC LIMIT ?;",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(TopInfinite {
+            name: row.get::<_, String>(0)?,
+            top: row.get::<_, i64>(1)? as usize,
+            opened: row.get::<_, i64>(2)? as usize,
+            bombs_clicked: row.get::<_, i64>(3)? as usize,
+        })
+    });
+    rows.map(|r| r.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
+}
+
+pub fn top_infinite_net(limit: usize) -> Vec<TopInfinite> {
+    with_conn(|c| top_infinite_net_in(c, limit)).unwrap_or_default()
 }
 
 /// Swappable path for unit tests (host temp dir; production always uses
@@ -671,12 +834,10 @@ fn test_db_path(tag: &str) -> String {
         *g += 1;
         *g
     };
-    std::env::temp_dir().join(format!(
-        "ppk_ms_test_{tag}_{}_{n}.sql",
-        std::process::id()
-    ))
-    .to_string_lossy()
-    .into_owned()
+    std::env::temp_dir()
+        .join(format!("ppk_ms_test_{tag}_{}_{n}.sql", std::process::id()))
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -745,9 +906,9 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].games, 3);
         assert_eq!(records[0].wins, 2);
-        assert_eq!(records[0].abandoned, 0);
         assert_eq!(records[0].best_secs, Some(60));
-        assert_eq!(records[0].avg_secs, Some(62));
+        // Only the two wins (1200 + 2400 ticks) contribute: 1800 / 20 = 90s.
+        assert_eq!(records[0].avg_secs, Some(90));
         assert_eq!(records[0].opened, 30);
         assert_eq!(records[0].flags, 12);
         assert_eq!(records[0].bombs, 9);
@@ -770,62 +931,187 @@ mod tests {
         record_game_in(&conn, &rec((1, 1), "Slow", KIND_2D, 50, 3000, OUTCOME_WIN)).unwrap();
         record_game_in(&conn, &rec((2, 2), "Fast", KIND_2D, 50, 1000, OUTCOME_WIN)).unwrap();
         record_game_in(&conn, &rec((3, 3), "Cube", KIND_3D, 7, 500, OUTCOME_WIN)).unwrap();
-        record_game_in(&conn, &rec((4, 4), "Unlucky", KIND_2D, 50, 100, OUTCOME_LOSS)).unwrap();
-        let board = top_spec_wins_in(&conn, KIND_2D, 50, 10);
+        record_game_in(
+            &conn,
+            &rec((4, 4), "Unlucky", KIND_2D, 50, 100, OUTCOME_LOSS),
+        )
+        .unwrap();
+        let board = top_spec_wins_in(&conn, KIND_2D, 50, true, 10);
         assert_eq!(board.len(), 2);
-        assert_eq!(board[0].owner_name, "Fast");
+        assert_eq!(board[0].name, "Fast");
         assert_eq!(board[0].secs, 50);
-        assert_eq!(board[1].owner_name, "Slow");
+        assert_eq!(board[1].name, "Slow");
         // Losses never appear; other specs never leak in.
-        assert!(top_spec_wins_in(&conn, KIND_2D, 30, 10).is_empty());
-        assert_eq!(top_spec_wins_in(&conn, KIND_3D, 7, 10).len(), 1);
-        assert_eq!(top_spec_wins_in(&conn, KIND_2D, 50, 1).len(), 1);
+        assert!(top_spec_wins_in(&conn, KIND_2D, 30, true, 10).is_empty());
+        assert_eq!(top_spec_wins_in(&conn, KIND_3D, 7, true, 10).len(), 1);
+        assert_eq!(top_spec_wins_in(&conn, KIND_2D, 50, true, 1).len(), 1);
         assert!(top_wins_in(&conn, Some(KIND_3D), 10).len() == 1);
         assert_eq!(top_wins_in(&conn, None, 10).len(), 3);
         dropdb(&path);
     }
 
     #[test]
-    fn spec_win_counts_rank_and_filter() {
+    fn spec_boards_split_solo_and_team_games() {
         let (conn, path) = memdb();
-        // "Grinder" wins two 2D-50 games (plus one loss), "Fast" one.
-        record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 3000, OUTCOME_WIN)).unwrap();
-        record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 1000, OUTCOME_WIN)).unwrap();
-        record_game_in(&conn, &rec((1, 1), "Grinder", KIND_2D, 50, 100, OUTCOME_LOSS)).unwrap();
-        record_game_in(&conn, &rec((2, 2), "Fast", KIND_2D, 50, 2000, OUTCOME_WIN)).unwrap();
-        record_game_in(&conn, &rec((3, 3), "Cube", KIND_3D, 7, 500, OUTCOME_WIN)).unwrap();
-        let top = top_spec_win_counts_in(&conn, KIND_2D, 50, 10);
-        assert_eq!(top.len(), 2);
-        assert_eq!(top[0].owner_name, "Grinder");
-        assert_eq!(top[0].wins, 2);
-        assert_eq!(top[1].owner_name, "Fast");
-        assert_eq!(top[1].wins, 1);
-        // Other specs never leak in.
-        assert_eq!(top_spec_win_counts_in(&conn, KIND_3D, 7, 10)[0].wins, 1);
-        assert!(top_spec_win_counts_in(&conn, KIND_2D, 30, 10).is_empty());
-        assert_eq!(top_spec_win_counts_in(&conn, KIND_2D, 50, 1).len(), 1);
+        record_game_in(&conn, &rec((1, 1), "Solo", KIND_2D, 50, 1000, OUTCOME_WIN)).unwrap();
+        ensure_player_in(&conn, (3, 3), Some("Helper")).unwrap();
+        let mut team = rec((2, 2), "Team", KIND_2D, 50, 2000, OUTCOME_WIN);
+        let roster = [(3, 3)];
+        team.helpers = &roster;
+        record_game_in(&conn, &team).unwrap();
+
+        let solo = top_spec_wins_in(&conn, KIND_2D, 50, true, 10);
+        assert_eq!(solo.len(), 1);
+        assert_eq!(solo[0].name, "Solo");
+
+        let team = top_spec_wins_in(&conn, KIND_2D, 50, false, 10);
+        assert_eq!(team.len(), 1);
+        assert_eq!(team[0].name, "Team, Helper");
         dropdb(&path);
     }
 
     #[test]
-    fn abandon_counts_as_game_but_never_a_win() {
+    fn team_best_time_shows_roster_and_dedups() {
+        let (conn, path) = memdb();
+        let owner = (2, 2);
+        let helper_a = (3, 3);
+        let helper_b = (4, 4);
+        ensure_player_in(&conn, helper_a, Some("HelperA")).unwrap();
+        ensure_player_in(&conn, helper_b, Some("HelperB")).unwrap();
+
+        let roster = [helper_a, helper_b];
+        let mut slower = rec(owner, "Owner", KIND_2D, 50, 2000, OUTCOME_WIN);
+        slower.helpers = &roster;
+        record_game_in(&conn, &slower).unwrap();
+        let mut faster = rec(owner, "Owner", KIND_2D, 50, 1500, OUTCOME_WIN);
+        faster.helpers = &roster;
+        record_game_in(&conn, &faster).unwrap();
+
+        let other_roster = [helper_a];
+        let mut other = rec((5, 5), "Other", KIND_2D, 50, 1000, OUTCOME_WIN);
+        other.helpers = &other_roster;
+        record_game_in(&conn, &other).unwrap();
+
+        // A solo win is not part of the team board.
+        record_game_in(&conn, &rec((6, 6), "Solo", KIND_2D, 50, 500, OUTCOME_WIN)).unwrap();
+
+        let team = top_spec_wins_in(&conn, KIND_2D, 50, false, 10);
+        assert_eq!(team.len(), 2);
+        assert_eq!(team[0].name, "Other, HelperA");
+        assert_eq!(team[0].secs, 50);
+        assert_eq!(team[1].name, "Owner, HelperA, HelperB");
+        assert_eq!(team[1].secs, 75);
+        dropdb(&path);
+    }
+
+    #[test]
+    fn team_win_counts_credit_each_participant() {
+        let (conn, path) = memdb();
+        let owner = (2, 2);
+        let helper_a = (3, 3);
+        let helper_b = (4, 4);
+        ensure_player_in(&conn, helper_a, Some("HelperA")).unwrap();
+        ensure_player_in(&conn, helper_b, Some("HelperB")).unwrap();
+
+        let roster_a = [helper_a];
+        for ticks in [1000, 2000] {
+            let mut game = rec(owner, "Owner", KIND_2D, 50, ticks, OUTCOME_WIN);
+            game.helpers = &roster_a;
+            record_game_in(&conn, &game).unwrap();
+        }
+
+        let roster_ab = [helper_a, helper_b];
+        let mut other = rec((5, 5), "Other", KIND_2D, 50, 3000, OUTCOME_WIN);
+        other.helpers = &roster_ab;
+        record_game_in(&conn, &other).unwrap();
+
+        // Solo wins and team losses do not count on the team board.
+        record_game_in(&conn, &rec((6, 6), "Solo", KIND_2D, 50, 500, OUTCOME_WIN)).unwrap();
+        let mut loss = rec(owner, "Owner", KIND_2D, 50, 100, OUTCOME_LOSS);
+        loss.helpers = &roster_a;
+        record_game_in(&conn, &loss).unwrap();
+
+        let team = top_spec_win_counts_in(&conn, KIND_2D, 50, false, 10);
+        assert_eq!(
+            team.iter()
+                .map(|row| (row.name.as_str(), row.wins))
+                .collect::<Vec<_>>(),
+            vec![("HelperA", 3), ("Owner", 2), ("HelperB", 1), ("Other", 1),]
+        );
+        dropdb(&path);
+    }
+
+    #[test]
+    fn spec_win_counts_rank_and_filter() {
+        let (conn, path) = memdb();
+        // "Grinder" wins two 2D-50 games (plus one loss); "Fast" wins one.
+        record_game_in(
+            &conn,
+            &rec((1, 1), "Grinder", KIND_2D, 50, 3000, OUTCOME_WIN),
+        )
+        .unwrap();
+        record_game_in(
+            &conn,
+            &rec((1, 1), "Grinder", KIND_2D, 50, 1000, OUTCOME_WIN),
+        )
+        .unwrap();
+        record_game_in(
+            &conn,
+            &rec((1, 1), "Grinder", KIND_2D, 50, 100, OUTCOME_LOSS),
+        )
+        .unwrap();
+        record_game_in(&conn, &rec((2, 2), "Fast", KIND_2D, 50, 2000, OUTCOME_WIN)).unwrap();
+        record_game_in(&conn, &rec((3, 3), "Cube", KIND_3D, 7, 500, OUTCOME_WIN)).unwrap();
+        let top = top_spec_win_counts_in(&conn, KIND_2D, 50, true, 10);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].name, "Grinder");
+        assert_eq!(top[0].wins, 2);
+        assert_eq!(top[1].name, "Fast");
+        assert_eq!(top[1].wins, 1);
+        // Other specs never leak in.
+        assert_eq!(
+            top_spec_win_counts_in(&conn, KIND_3D, 7, true, 10)[0].wins,
+            1
+        );
+        assert!(top_spec_win_counts_in(&conn, KIND_2D, 30, true, 10).is_empty());
+        assert_eq!(top_spec_win_counts_in(&conn, KIND_2D, 50, true, 1).len(), 1);
+        dropdb(&path);
+    }
+
+    #[test]
+    fn abandoned_games_are_losses_and_do_not_rank() {
         let (conn, path) = memdb();
         let owner = (9, 9);
-        record_game_in(&conn, &rec(owner, "Quitter", KIND_2D, 20, 200, OUTCOME_ABANDONED))
-            .unwrap();
+        record_game_in(
+            &conn,
+            &rec(owner, "Quitter", KIND_2D, 20, 200, OUTCOME_LOSS),
+        )
+        .unwrap();
         let records = spec_records_in(&conn, owner);
         assert_eq!(records[0].games, 1);
         assert_eq!(records[0].wins, 0);
-        assert_eq!(records[0].abandoned, 1);
         assert_eq!(records[0].best_secs, None);
         assert_eq!(records[0].avg_secs, None);
-        // Abandoned and lost games don't rank on the "most wins" board.
-        assert!(top_spec_win_counts_in(&conn, KIND_2D, 20, 10).is_empty());
-        record_game_in(&conn, &rec(owner, "Quitter", KIND_2D, 20, 400, OUTCOME_LOSS)).unwrap();
-        assert!(top_spec_win_counts_in(&conn, KIND_2D, 20, 10).is_empty());
-        // A win does, and abandoned/lost games still don't add to it.
+        // Losses do not rank.
+        assert!(top_spec_win_counts_in(&conn, KIND_2D, 20, true, 10).is_empty());
+        // A loss also doesn't rank.
+        record_game_in(
+            &conn,
+            &rec(owner, "Quitter", KIND_2D, 20, 400, OUTCOME_LOSS),
+        )
+        .unwrap();
+        assert!(top_spec_win_counts_in(&conn, KIND_2D, 20, true, 10).is_empty());
+        // A win does.
         record_game_in(&conn, &rec(owner, "Quitter", KIND_2D, 20, 500, OUTCOME_WIN)).unwrap();
-        assert_eq!(top_spec_win_counts_in(&conn, KIND_2D, 20, 10)[0].wins, 1);
+        assert_eq!(
+            top_spec_win_counts_in(&conn, KIND_2D, 20, true, 10)[0].wins,
+            1
+        );
+        // Only the win contributes to the average (500 / 20 = 25s).
+        let records = spec_records_in(&conn, owner);
+        assert_eq!(records[0].games, 3);
+        assert_eq!(records[0].wins, 1);
+        assert_eq!(records[0].avg_secs, Some(25));
         dropdb(&path);
     }
 
@@ -835,8 +1121,8 @@ mod tests {
         let owner = (7, 7);
         record_game_in(&conn, &rec(owner, "Alice", KIND_2D, 20, 400, OUTCOME_WIN)).unwrap();
         ensure_player_in(&conn, owner, Some("Alicia")).unwrap();
-        let top = top_spec_wins_in(&conn, KIND_2D, 20, 10);
-        assert_eq!(top[0].owner_name, "Alicia");
+        let top = top_spec_wins_in(&conn, KIND_2D, 20, true, 10);
+        assert_eq!(top[0].name, "Alicia");
         let history: String = conn
             .query_row(
                 "SELECT name_history FROM MsPlayers WHERE uuid = ?;",
@@ -885,6 +1171,46 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].name, "Bobby");
         assert_eq!(top[0].top, 42);
+        assert_eq!(top[0].bombs_clicked, 3);
+        assert_eq!(top[0].net(), 497);
+        dropdb(&path);
+    }
+
+    #[test]
+    fn infinite_boards_rank_streak_and_net_cells() {
+        let (conn, path) = memdb();
+        // Streak leader, but a poor net total after bombs.
+        save_infinite_in(&conn, (1, 1), Some("Streaker"), 100, 120, 80, 400).unwrap();
+        // Lower streak, but the best net total.
+        save_infinite_in(&conn, (2, 2), Some("Digger"), 50, 500, 2, 400).unwrap();
+        // Negative net: bombs outnumber opened cells.
+        save_infinite_in(&conn, (3, 3), Some("Bomber"), 10, 5, 20, 400).unwrap();
+
+        let streaks = top_infinite_in(&conn, 10);
+        assert_eq!(streaks[0].name, "Streaker");
+        assert_eq!(streaks[1].name, "Digger");
+
+        let net = top_infinite_net_in(&conn, 10);
+        assert_eq!(net[0].name, "Digger");
+        assert_eq!(net[0].net(), 498);
+        assert_eq!(net[1].name, "Streaker");
+        assert_eq!(net[1].net(), 40);
+        assert_eq!(net[2].name, "Bomber");
+        assert_eq!(net[2].net(), -15);
+        dropdb(&path);
+    }
+
+    #[test]
+    fn daily_table_has_no_abandoned_column() {
+        let (conn, path) = memdb();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('MsDaily') WHERE name = 'abandoned';",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
         dropdb(&path);
     }
 
@@ -892,15 +1218,15 @@ mod tests {
     fn daily_rollup_accumulates() {
         let (conn, path) = memdb();
         record_game_in(&conn, &rec((1, 1), "A", KIND_2D, 20, 400, OUTCOME_WIN)).unwrap();
-        record_game_in(&conn, &rec((2, 2), "B", KIND_3D, 5, 200, OUTCOME_ABANDONED)).unwrap();
-        let (games, wins, abandoned, opened, flags, ticks): (i64, i64, i64, i64, i64, i64) =
-            conn.query_row(
-                "SELECT games, wins, abandoned, opened, flags, time_ticks FROM MsDaily;",
+        record_game_in(&conn, &rec((2, 2), "B", KIND_3D, 5, 200, OUTCOME_LOSS)).unwrap();
+        let (games, wins, opened, flags, ticks): (i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT games, wins, opened, flags, time_ticks FROM MsDaily;",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
-        assert_eq!((games, wins, abandoned), (2, 1, 1));
+        assert_eq!((games, wins), (2, 1));
         assert_eq!((opened, flags, ticks), (20, 8, 600));
         dropdb(&path);
     }

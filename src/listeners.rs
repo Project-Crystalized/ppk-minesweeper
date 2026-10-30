@@ -2,19 +2,18 @@
 //! right-click flags.
 
 use pumpkin_plugin_api::{
+    Player, Server,
     events::{
         BlockBreakEvent, BlockExplodeEvent, BlockPlaceEvent, CreatureSpawnEvent,
         EntityExplodeEvent, EventData, EventHandler, InteractAction, PlayerInteractEvent,
         PlayerJoinEvent, PlayerLeaveEvent, SpawnerSpawnEvent, TrialSpawnerSpawnEvent,
     },
-    Player, Server,
 };
 
 use crate::{
     games,
     helpers::{tell, to_pos3, uuid_key},
-    infinite,
-    state,
+    infinite, state,
 };
 
 fn reset_flag_color(player: &Player) {
@@ -26,7 +25,11 @@ fn reset_flag_color(player: &Player) {
 pub struct JoinListener;
 
 impl EventHandler<PlayerJoinEvent> for JoinListener {
-    fn handle(&self, _server: Server, event: EventData<PlayerJoinEvent>) -> EventData<PlayerJoinEvent> {
+    fn handle(
+        &self,
+        _server: Server,
+        event: EventData<PlayerJoinEvent>,
+    ) -> EventData<PlayerJoinEvent> {
         // Fresh kit: wipe stale slots, then lay out the hotbar kit.
         crate::sticks::give_fresh_kit(&event.player);
         crate::state::mark_join(crate::helpers::uuid_key(&event.player));
@@ -81,9 +84,7 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
         let pos = to_pos3(event.block_pos);
 
         // Bedrock does not fire PlayerInteractEvent for block clicks.
-        if let Some(crate::sticks::HeldSpecial::FlagCycle) =
-            crate::sticks::held_special(player)
-        {
+        if let Some(crate::sticks::HeldSpecial::FlagCycle) = crate::sticks::held_special(player) {
             reset_flag_color(player);
             event.cancelled = true;
             event.should_drop = false;
@@ -140,6 +141,51 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
             || event.action == InteractAction::RightClickAir;
         if !is_right_click {
             return event;
+        }
+        // Any wooden button server-wide toggles solo/team; any stone button
+        // toggles the 2D/3D board size. Leave the event uncancelled so the
+        // button still animates, but consume it here so sticks cannot act on
+        // the same click.
+        if event.action == InteractAction::RightClickBlock {
+            if let Some(kind) = crate::leaderboard::button_kind(&event.block) {
+                // Another plugin cancelled this interaction (protection,
+                // region rules, etc.); do not change the global view.
+                if event.cancelled {
+                    return event;
+                }
+                // One physical press can produce main-hand + off-hand events,
+                // and a held button can spam. Keep it to one toggle per player
+                // per short window.
+                if !crate::leaderboard::button_click_allowed(uuid_key(&event.player)) {
+                    return event;
+                }
+                match kind {
+                    crate::leaderboard::ButtonKind::Wooden => {
+                        let solo = crate::leaderboard::toggle_solo_only();
+                        tell(
+                            &event.player,
+                            if solo {
+                                "Leaderboards: solo games only."
+                            } else {
+                                "Leaderboards: team games only."
+                            },
+                        );
+                    }
+                    crate::leaderboard::ButtonKind::Stone => {
+                        let bigger = crate::leaderboard::toggle_bigger_sizes();
+                        tell(
+                            &event.player,
+                            if bigger {
+                                "Leaderboards: bigger sizes (2D 40x40, 3D 7x7x7)."
+                            } else {
+                                "Leaderboards: smaller sizes (2D 20x20, 3D 5x5x5)."
+                            },
+                        );
+                    }
+                }
+                crate::leaderboard::request_refresh();
+                return event;
+            }
         }
         // Starter sticks win over flagging.
         if let Some(spec) = crate::sticks::held_starter(&event.player) {

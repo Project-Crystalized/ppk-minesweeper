@@ -1,11 +1,11 @@
 //! `/ms` command tree: help, new games, clear/list, infinite teleport.
 
 use pumpkin_plugin_api::{
+    Server,
     command::{Arg, CommandError, CommandSender, ConsumedArgs},
     commands::CommandHandler,
     text::TextComponent,
     wit::pumpkin::plugin::command::Number,
-    Server,
 };
 
 use crate::{games::NewGameSpec, helpers::uuid_key, state::GameKind};
@@ -59,12 +59,19 @@ fn parse_size(args: &ConsumedArgs) -> Option<i32> {
     }
 }
 
-fn start_sized(sender: &CommandSender, kind: GameKind, args: &ConsumedArgs) -> Result<i32, CommandError> {
+fn start_sized(
+    sender: &CommandSender,
+    kind: GameKind,
+    args: &ConsumedArgs,
+) -> Result<i32, CommandError> {
     let Some(player) = player_of(sender) else {
         sender.send_error(TextComponent::text("Only players can start games."));
         return Ok(0);
     };
-    match parse_size(args).and_then(|n| usize::try_from(n).ok()).and_then(|n| NewGameSpec::custom(kind, n)) {
+    match parse_size(args)
+        .and_then(|n| usize::try_from(n).ok())
+        .and_then(|n| NewGameSpec::custom(kind, n))
+    {
         Some(spec) => {
             crate::games::create_game(&player, spec);
             Ok(1)
@@ -102,7 +109,8 @@ impl CommandHandler for NewGame3dCommand {
     }
 }
 
-pub struct ClearCommand;impl CommandHandler for ClearCommand {
+pub struct ClearCommand;
+impl CommandHandler for ClearCommand {
     fn handle(
         &self,
         sender: CommandSender,
@@ -232,12 +240,17 @@ impl CommandHandler for StatsCommand {
             lines.push("No recorded games yet.".to_string());
         }
         for r in records {
-            let games = if r.games == 1 { "1 game".into() } else { format!("{} games", r.games) };
-            let wins = if r.wins == 1 { "1 win".into() } else { format!("{} wins", r.wins) };
+            let games = if r.games == 1 {
+                "1 game".into()
+            } else {
+                format!("{} games", r.games)
+            };
+            let wins = if r.wins == 1 {
+                "1 win".into()
+            } else {
+                format!("{} wins", r.wins)
+            };
             let mut line = format!("{}: {games}, {wins}", spec_label(r.kind, r.dim));
-            if r.abandoned > 0 {
-                line.push_str(&format!(", {} abandoned", r.abandoned));
-            }
             if let Some(best) = r.best_secs {
                 line.push_str(&format!(", best {best}s"));
             }
@@ -290,7 +303,7 @@ impl CommandHandler for TopCommand {
             lines.push(format!(
                 "{}. {} - {} in {}s",
                 i + 1,
-                w.owner_name,
+                w.name,
                 spec_label(w.kind, w.dim),
                 w.secs
             ));

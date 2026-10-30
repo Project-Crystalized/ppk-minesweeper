@@ -4,14 +4,14 @@ use pumpkin_plugin_api::{Player, World};
 
 use crate::{
     core::{
-        self, adjacent_2d, adjacent_3d, blank_board_2d, blank_board_3d, bomb_amount_2d,
-        bomb_amount_3d, generate_board_2d_safe, generate_board_3d_safe, is_won, CellContent,
-        CellState, Pos3, TinyRng, AIR_BLOCK, COVERED_BLOCK,
+        self, AIR_BLOCK, COVERED_BLOCK, CellContent, CellState, Pos3, TinyRng, adjacent_2d,
+        adjacent_3d, blank_board_2d, blank_board_3d, bomb_amount_2d, bomb_amount_3d,
+        generate_board_2d_safe, generate_board_3d_safe, is_won,
     },
-    helpers::{self, is_air, play_sound, set_block, set_tile, tell, Sound},
+    helpers::{self, Sound, is_air, play_sound, set_block, set_tile, tell},
     state::{
-        self, GameInstance, GameKind, MAX_BUILD_Y, MAX_GAMES_PER_PLAYER, MIN_BUILD_Y,
-        FLAG_LOCK_TICKS,
+        self, FLAG_LOCK_TICKS, GameInstance, GameKind, MAX_BUILD_Y, MAX_GAMES_PER_PLAYER,
+        MIN_BUILD_Y,
     },
 };
 
@@ -134,12 +134,13 @@ fn cells_of(spec: NewGameSpec, origin: Pos3) -> (GameKind, usize, Vec<core::Cell
     }
 }
 
-
-
 pub fn create_game(player: &Player, spec: NewGameSpec) {
     let owner = helpers::uuid_key(player);
     if state::player_game_count(owner) >= MAX_GAMES_PER_PLAYER {
-        tell(player, "You can't have more than 3 games active (/ms clear).");
+        tell(
+            player,
+            "You can't have more than 3 games active (/ms clear).",
+        );
         return;
     }
     let world = player.get_world();
@@ -237,8 +238,8 @@ pub fn clear_game_in_world(world: &World, id: u32) {
     }
 }
 
-/// Admin helper: record the board closest to `pos` (unfinished games become
-/// abandoned) and clear it. Returns `(game_id, owner_name, label)` for
+/// Admin helper: record the board closest to `pos` (unfinished games are
+/// stored as losses) and clear it. Returns `(game_id, owner_name, label)` for
 /// feedback, or `None` when the current world has no boards.
 pub fn admin_clear_nearest(world: &World, pos: (f64, f64, f64)) -> Option<(u32, String, String)> {
     let world_id = world.get_id();
@@ -348,11 +349,7 @@ pub enum ClickDecision {
     DenyLocked,
 }
 
-pub fn decide_left(
-    game: &GameInstance,
-    who: crate::state::UuidKey,
-    idx: usize,
-) -> ClickDecision {
+pub fn decide_left(game: &GameInstance, who: crate::state::UuidKey, idx: usize) -> ClickDecision {
     if game.is_over {
         return ClickDecision::Ignore;
     }
@@ -365,11 +362,7 @@ pub fn decide_left(
     }
 }
 
-pub fn decide_right(
-    game: &GameInstance,
-    who: crate::state::UuidKey,
-    idx: usize,
-) -> ClickDecision {
+pub fn decide_right(game: &GameInstance, who: crate::state::UuidKey, idx: usize) -> ClickDecision {
     if game.is_over {
         return ClickDecision::Ignore;
     }
@@ -401,12 +394,7 @@ fn keep_flags(board: &mut [core::Cell], old: &[core::Cell]) {
 /// Left-click (block break) on a board cell. Always returns true: the click
 /// belonged to a game, so the caller must cancel the break event even when
 /// the click itself was a no-op (flagged cell, already open, locked game).
-pub fn click_left(
-    world: &World,
-    player: &Player,
-    id: u32,
-    idx: usize,
-) -> bool {
+pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
     let owner = helpers::uuid_key(player);
     // Owner clicking after game over despawns the game.
     let over_owned = state::with_game(id, |g| g.is_over && g.owner == owner).unwrap_or(false);
@@ -513,9 +501,10 @@ pub fn click_left(
     }
 }
 
-/// Persist a finished (or, when `allow_unfinished`, abandoned) game exactly
-/// once. Retries on later clicks until the write succeeds, so a transient DB
-/// failure loses nothing (the `recorded` flag only flips on success).
+/// Persist a finished game exactly once. When `allow_unfinished` is set, an
+/// unfinished board is abandoned and stored as a loss. Retries on later clicks
+/// until the write succeeds, so a transient DB failure loses nothing (the
+/// `recorded` flag only flips on success).
 fn record_game_end(id: u32, allow_unfinished: bool) {
     let snap = state::with_game(id, |g| {
         let origin = g.origin();
@@ -576,7 +565,7 @@ fn record_game_end(id: u32, allow_unfinished: bool) {
             crate::db::OUTCOME_LOSS
         }
     } else if allow_unfinished {
-        crate::db::OUTCOME_ABANDONED
+        crate::db::OUTCOME_LOSS
     } else {
         return;
     };
@@ -750,10 +739,7 @@ pub fn describe_all_for(owner_filter: Option<crate::state::UuidKey>) -> String {
 pub fn toggle_lock_report(who: crate::state::UuidKey, id: Option<u32>) -> String {
     match id {
         Some(id) => match state::toggle_lock(id, who) {
-            Some(locked) => format!(
-                "Game #{id} {}.",
-                if locked { "locked" } else { "unlocked" }
-            ),
+            Some(locked) => format!("Game #{id} {}.", if locked { "locked" } else { "unlocked" }),
             None => format!("No owned game #{id} to lock."),
         },
         None => {
@@ -774,7 +760,10 @@ pub fn toggle_lock_report(who: crate::state::UuidKey, id: Option<u32>) -> String
 mod tests {
     #[test]
     fn below_candidates_descend_order() {
-        assert_eq!(super::below_candidates(-10), vec![-1, -2, -3, -4, -5, -6, -7, -8, -9, -10]);
+        assert_eq!(
+            super::below_candidates(-10),
+            vec![-1, -2, -3, -4, -5, -6, -7, -8, -9, -10]
+        );
         assert_eq!(super::below_candidates(-1), vec![-1]);
         // Floor nearer than 10 blocks: only the layers above it remain;
         // down_to >= 0 means no room below at all.
@@ -834,13 +823,22 @@ mod tests {
         let stranger = (0xDEAD_0002, 0xBEEF_0002);
         let open_game = test_game(owner, 60_011, false);
         assert_eq!(decide_left(&open_game, stranger, 0), ClickDecision::Proceed);
-        assert_eq!(decide_right(&open_game, stranger, 0), ClickDecision::Proceed);
-        assert_eq!(decide_right(&open_game, stranger, 2), ClickDecision::Proceed);
+        assert_eq!(
+            decide_right(&open_game, stranger, 0),
+            ClickDecision::Proceed
+        );
+        assert_eq!(
+            decide_right(&open_game, stranger, 2),
+            ClickDecision::Proceed
+        );
         assert_eq!(decide_right(&open_game, stranger, 3), ClickDecision::Ignore);
 
         let mut locked = test_game(owner, 60_021, true);
         assert_eq!(decide_left(&locked, stranger, 0), ClickDecision::DenyLocked);
-        assert_eq!(decide_right(&locked, stranger, 0), ClickDecision::DenyLocked);
+        assert_eq!(
+            decide_right(&locked, stranger, 0),
+            ClickDecision::DenyLocked
+        );
         assert_eq!(decide_left(&locked, owner, 0), ClickDecision::Proceed);
 
         locked.is_over = true;
@@ -969,7 +967,10 @@ mod tests {
             toggle_lock_report((8, 8), Some(id)),
             format!("No owned game #{id} to lock.")
         );
-        assert_eq!(toggle_lock_report(owner, Some(id)), format!("Game #{id} unlocked."));
+        assert_eq!(
+            toggle_lock_report(owner, Some(id)),
+            format!("Game #{id} unlocked.")
+        );
         assert!(!status_line(id).unwrap().contains("[Locked]"));
         state::remove_game(id);
         assert_eq!(route("test_world", pos), None);

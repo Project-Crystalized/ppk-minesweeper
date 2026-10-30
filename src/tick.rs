@@ -1,12 +1,9 @@
 //! Per-tick driver: a fast 1-tick counter for cooldowns plus the existing
 //! per-second work (game timers, sidebar status, lock cleanup).
 
-use pumpkin_plugin_api::{scheduler::SchedulerExt, Context, Server};
+use pumpkin_plugin_api::{Context, Server, scheduler::SchedulerExt};
 
-use crate::{
-    helpers::uuid_key,
-    state,
-};
+use crate::{helpers::uuid_key, state};
 
 pub fn start_tick_task(context: &Context) {
     context.schedule_repeating_task(1, 1, |server: Server| {
@@ -17,6 +14,9 @@ pub fn start_tick_task(context: &Context) {
 fn tick(server: Server) {
     let now = state::tick_advance();
     state::advance_game_timers();
+    if crate::leaderboard::take_refresh_request() {
+        crate::leaderboard::refresh(&server);
+    }
     if now % 20 != 0 {
         return;
     }

@@ -11,15 +11,16 @@ inside Pumpkin instead of as its own server.
 | `/ms help` | Show help |
 | `/ms 2d <size>` | Start a flat board with custom dimension (2+) |
 | `/ms 3d <size>` | Start a 3D cube with custom dimension (2+) |
-| `/ms clear` | Remove all your games (unfinished ones logged as abandoned, blocks cleared) |
+| `/ms clear` | Remove all your games (unfinished ones logged as losses, blocks cleared) |
 | `/ms clearnearest` | Admin: clear the closest board in your world |
 | `/ms list` | List your games (kind, dim, locks, helpers) |
-| `/ms stats` | Per-size record (games, wins, best/avg) + co-op + infinite totals |
+| `/ms stats` | Per-size record (games, wins, best/avg win time) + co-op + infinite totals |
 | `/ms top` | Fastest wins + best infinite streaks (from SQLite) |
 | `/ms infinite` | Teleport to the endless `ms_infinite` world |
 
 Left-click a cell to open it, right-click toggles a flag with your own color.
-Flagged/open cells ignore left-clicks (flagged bombs can't explode).
+Flagged/open cells ignore left-clicks (flagged bombs can't explode). Only
+opening a cell adds you as a helper; flagging alone does not.
 Your starter sticks (20x20, 40x40, 3D 5x5, 3D 7x7), lock toggle and flag
 switcher are pre-placed in the hotbar. Lock/unlock with the horse-armor item.
 Right-click the wool item to cycle through 12 flag colors; left-click it to
@@ -32,9 +33,9 @@ Infinite mode tracks streaks with color tiers and 500/1000 broadcasts.
 
 ## Persistence (SQLite)
 
-Finished sized games (win or loss) and explicitly abandoned boards
-(`/ms clear`) plus infinite-mode lifetime totals are recorded in a single
-SQLite file, following the `LsDatabase` conventions (one file,
+Finished sized games, including boards explicitly abandoned with `/ms clear`,
+plus infinite-mode lifetime totals are recorded in a single SQLite file,
+following the `LsDatabase` conventions (one file,
 `CREATE TABLE IF NOT EXISTS`, fail-soft: a broken DB disables recording, the
 game keeps running):
 
@@ -43,24 +44,54 @@ game keeps running):
   leaderboards are resolved from here, so renames show up immediately.
 - `MsGames`: one row per finished or abandoned game: `kind` (0 = 2D,
   1 = 3D), `dim`, final board `seed`, `time_ticks`, `outcome`
-  (0 = loss, 1 = win, 2 = abandoned), bombs, flags, flags placed, cells
-  opened, left-clicks, helper count, locked flag,
+  (0 = loss, 1 = win; abandoned games are stored as losses), bombs, flags,
+  flags placed, cells opened, left-clicks, helper count, locked flag,
   epoch end time and board origin `x/y/z`. The world a game was played in is
   deliberately not stored.
 - `MsGamePlayers`: game roster (`is_owner` 1/0), which powers co-op credit.
 - `MsInfiniteStats`: lifetime infinite totals per player (best streak, cells
   opened, bombs clicked, playtime, last played). Only totals persist; the
   live streak restarts at 0 after every login.
-- `MsDaily`: small per-day rollup (`games`, `wins`, `abandoned`, `opened`,
-  `flags`, `time_ticks`), reserved for a future stats page.
+- `MsDaily`: small per-day rollup (`games`, `wins`, `opened`, `flags`,
+  `time_ticks`), reserved for a future stats page.
 - Indexes: a partial fastest-win index per `(kind, dim)` restricted to wins,
   a per-spec games index, a per-owner `(owner_id, kind, dim)` index and a
   roster lookup on `MsGamePlayers(player_id)`.
 
-There is intentionally no migration/backfill code. Schema changes require
-deleting `data/minesweeper.sql` before deploying (the plugin recreates it).
-With one finished game per minute, the log grows by roughly 40–45 MB per year
-including its indexes.
+There is intentionally no automatic migration/backfill code. For the
+`MsDaily.abandoned` removal, stop the server, back up the DB, then run:
+
+```sh
+DB=/path/to/plugins/data/<plugin>/minesweeper.sql
+cp "$DB" "$DB.bak"
+sqlite3 "$DB" "ALTER TABLE MsDaily DROP COLUMN abandoned;"
+```
+
+If your `sqlite3` is older than 3.35, rebuild the table instead:
+
+```sh
+sqlite3 "$DB" <<'SQL'
+BEGIN;
+CREATE TABLE MsDaily_new(
+  day INTEGER PRIMARY KEY,
+  games INTEGER NOT NULL,
+  wins INTEGER NOT NULL,
+  opened INTEGER NOT NULL,
+  flags INTEGER NOT NULL,
+  time_ticks INTEGER NOT NULL);
+INSERT INTO MsDaily_new(day, games, wins, opened, flags, time_ticks)
+SELECT day, games, wins, opened, flags, time_ticks FROM MsDaily;
+DROP TABLE MsDaily;
+ALTER TABLE MsDaily_new RENAME TO MsDaily;
+COMMIT;
+SQL
+```
+
+The new build does not write `abandoned`; migrate before deploying or
+`MsDaily` writes will fail because the old column is `NOT NULL` with no
+default. For any other schema change, delete `data/minesweeper.sql` before
+deploying (the plugin recreates it). With one finished game per minute, the log
+grows by roughly 40–45 MB per year including its indexes.
 
 The WASM sandbox only exposes the plugin's own data folder (the manifest
 requests `fs.write.data`), so the file lives at
@@ -74,7 +105,23 @@ with `sqlite3` like the other game DBs.
 ## Leaderboards
 
 In-world leaderboards are displayed around the spawn plaza and refresh
-automatically.
+automatically. The six boards show:
+
+- Infinite: highest streak and highest net cells opened
+  (`total_opened - bombs_clicked`).
+- 2D: fastest win and most wins.
+- 3D: fastest win and most wins.
+
+The "most wins" boards count wins only; losses do not count. Abandoned games
+are stored as losses. On the team best-time boards, each row shows the full
+roster that set the time. On the team most-wins boards, every participant gets
+credit for the team win, and each row shows one player and their count.
+
+Right-click any wooden button, anywhere on the server, to toggle solo-only vs
+team-only games. Right-click any stone button to toggle the small sizes
+(2D 20x20, 3D 5x5x5) vs the big sizes (2D 40x40, 3D 7x7x7). Server start
+defaults to solo-only and the big sizes. Infinite boards are all-player and
+have no team or size dimension, so neither button affects them.
 
 The world spawn is world data, not plugin code: it lives in
 `world/level.dat` (`SpawnX/Y/Z`, `SpawnAngle`, plus the `spawn` compound).
