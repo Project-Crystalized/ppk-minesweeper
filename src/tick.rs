@@ -13,6 +13,7 @@ pub fn start_tick_task(context: &Context) {
 
 fn tick(server: Server) {
     let now = state::tick_advance();
+    crate::helpers::tick_open_sounds(&server, now);
     state::advance_game_timers();
     if crate::leaderboard::take_refresh_request() {
         crate::leaderboard::refresh(&server);

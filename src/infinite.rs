@@ -14,7 +14,10 @@ use crate::{
     core::{
         infinite_is_bomb, infinite_number_at, CellContent, Pos3, COVERED_BLOCK,
     },
-    helpers::{block_is, block_name, is_air, play_sound, set_block, set_tile, tell, to_block_pos, uuid_key, Sound},
+    helpers::{
+        Sound, block_is, block_name, is_air, play_bomb, play_open_cascade, play_open_strong,
+        play_sound, set_block, set_tile, tell, to_block_pos, uuid_key,
+    },
     state,
 };
 
@@ -171,7 +174,9 @@ pub fn handle_break(
             Outcome::Bomb
         }
         CellContent::Empty => {
+            play_open_strong(world, pos);
             let mut opened = 0usize;
+            let mut opened_positions = Vec::new();
             let mut stack = vec![(x, z)];
             let mut seen = HashSet::new();
             while let Some((cx, cz)) = stack.pop() {
@@ -188,6 +193,7 @@ pub fn handle_break(
                 let cell_content = content_at(cx, cz);
                 set_tile(world, cell_pos, cell_content);
                 opened += 1;
+                opened_positions.push(cell_pos);
                 if cell_content == CellContent::Empty {
                     for dz in -1..=1 {
                         for dx in -1..=1 {
@@ -196,17 +202,21 @@ pub fn handle_break(
                     }
                 }
             }
+            if opened > 1 {
+                play_open_cascade(world, pos, opened, opened_positions);
+            }
             Outcome::Opened(opened)
         }
         CellContent::Number(_) => {
             set_tile(world, pos, content);
+            play_open_strong(world, pos);
             Outcome::Opened(1)
         }
     };
 
     match outcome {
         Outcome::Bomb => {
-            play_sound(world, Pos3::new(x, y, z), Sound::EntityGenericExplode);
+            play_bomb(world, Pos3::new(x, y, z));
             state::with_session_mut(key, |s| {
                 s.current_streak = 0;
                 s.bombs_clicked += 1;
@@ -217,7 +227,6 @@ pub fn handle_break(
             true
         }
         Outcome::Opened(n) => {
-            play_sound(world, Pos3::new(x, y, z), Sound::EntityFrogStep);
             let (before, after) = state::with_session_mut(key, |s| {
                 let before = s.current_streak;
                 s.total_opened += n;

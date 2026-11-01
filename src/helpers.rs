@@ -4,14 +4,21 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use pumpkin_plugin_api::{
-    common::BlockPos, text::TextComponent,
+    Player, Server, World,
+    common::BlockPos,
+    text::TextComponent,
     wit::pumpkin::plugin::{game_rules::GameRule, world::Block, world::BlockFlags},
-    Player, World,
 };
 
-use crate::{core::{CellContent, Pos3}, state::UuidKey};
+use crate::{
+    core::{CellContent, Pos3},
+    state::UuidKey,
+};
 
-pub use pumpkin_plugin_api::wit::pumpkin::plugin::sounds::{Sound, SoundCategory};
+pub use pumpkin_plugin_api::wit::pumpkin::plugin::{
+    particles::Particle,
+    sounds::{Sound, SoundCategory},
+};
 
 /// Board writes notify listeners only; physics/shape updates are skipped
 /// (blocks are inert decoration, and they hitch every flood fill).
@@ -74,13 +81,21 @@ impl<'w> BulkWriter<'w> {
     pub fn set_state(&mut self, pos: Pos3, id: u16) {
         let (cx, lx) = (pos.x >> 4, pos.x & 15);
         let (cz, lz) = (pos.z >> 4, pos.z & 15);
-        let chunk = self.chunks.entry((cx, cz)).or_insert_with(|| self.world.get_chunk(cx, cz));
+        let chunk = self
+            .chunks
+            .entry((cx, cz))
+            .or_insert_with(|| self.world.get_chunk(cx, cz));
         let Some(chunk) = chunk else {
-            self.world.set_block_state(to_block_pos(pos), id, update_flags());
+            self.world
+                .set_block_state(to_block_pos(pos), id, update_flags());
             return;
         };
         chunk.set_block_state(
-            BlockPos { x: lx, y: pos.y, z: lz },
+            BlockPos {
+                x: lx,
+                y: pos.y,
+                z: lz,
+            },
             id,
         );
     }
@@ -99,7 +114,10 @@ fn state_id(name: &str, facing: Option<&str>) -> Option<u16> {
         Some(face) => format!("{name}#facing={face}"),
         None => name.to_string(),
     };
-    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
     if !cache.contains_key(&key) {
         cache.insert(key.clone(), resolve_state_id(name, facing));
     }
@@ -114,7 +132,11 @@ fn resolve_state_id(name: &str, facing: Option<&str>) -> Option<u16> {
     block
         .get_states()
         .into_iter()
-        .find(|s| s.get_properties().iter().any(|(k, v)| k == "facing" && v == face))
+        .find(|s| {
+            s.get_properties()
+                .iter()
+                .any(|(k, v)| k == "facing" && v == face)
+        })
         .map(|s| s.id)
 }
 
@@ -172,24 +194,196 @@ pub fn action_bar_component(player: &Player, comp: TextComponent) {
     player.send_system_message(comp, true);
 }
 
-/// Positional world sound. NOTE: Pumpkin 0.2.0's `play_sound` builds the
-/// lookup name as `format!("{sound:?}").to_lowercase()` ("entityfrogstep"),
-/// which traps, so this uses dotted custom sound names instead.
-pub fn play_sound(world: &World, pos: Pos3, sound: Sound) {
-    let name = match sound {
-        Sound::BlockWoolPlace => "block.wool.place",
-        Sound::BlockWoolBreak => "block.wool.break",
-        Sound::EntityGenericExplode => "entity.generic.explode",
-        Sound::EntityFrogStep => "entity.frog.step",
-        Sound::ItemGoatHornSound1 => "item.goat_horn.sound.1",
-        _ => return,
-    };
+const SOUND_VOLUME: f32 = 20.0;
+/// The shard detonation is the main bomb hit, so push it above the old
+/// full-volume cue.
+const CUSTOM_BOMB_VOLUME: f32 = 32.0;
+/// The vanilla explosion is only a low-end layer under the detonation.
+const BOMB_EXPLOSION_VOLUME: f32 = 2.0;
+
+fn play_named_sound_at_pitched(world: &World, pos: Pos3, name: &str, volume: f32, pitch: f32) {
     world.play_custom_sound(
         name,
         SoundCategory::Ambient,
         (pos.x as f64, pos.y as f64, pos.z as f64),
-        1.0,
-        1.0,
+        volume,
+        pitch,
+    );
+}
+
+fn play_named_sound_at(world: &World, pos: Pos3, name: &str, volume: f32) {
+    play_named_sound_at_pitched(world, pos, name, volume, 1.0);
+}
+
+/// Positional world sound. NOTE: Pumpkin 0.2.0's `play_sound` builds the
+/// lookup name as `format!("{sound:?}").to_lowercase()` ("entityfrogstep"),
+/// which traps, so this uses dotted custom sound names instead.
+pub fn play_named_sound(world: &World, pos: Pos3, name: &str) {
+    play_named_sound_at(world, pos, name, SOUND_VOLUME);
+}
+
+pub fn play_sound(world: &World, pos: Pos3, sound: Sound) {
+    let name = match sound {
+        Sound::BlockWoolPlace => "block.wool.place",
+        Sound::BlockWoolBreak => "block.wool.break",
+        Sound::ItemGoatHornSound1 => "item.goat_horn.sound.1",
+        _ => return,
+    };
+    play_named_sound(world, pos, name);
+}
+
+const OPEN_CASCADE_MIN_NOTES: usize = 2;
+const OPEN_CASCADE_MAX_NOTES: usize = 10;
+const OPEN_CASCADE_BIG_THRESHOLD: usize = 25;
+const OPEN_CASCADE_BASS_VOLUME: f32 = 9.0;
+const OPEN_CASCADE_BASS_PITCH: f32 = 0.85;
+const OPEN_CASCADE_NOTE_VOLUME: f32 = 22.0;
+const OPEN_CASCADE_MID_VOLUME: f32 = 17.0;
+const OPEN_CASCADE_FINAL_VOLUME: f32 = 21.0;
+const OPEN_CASCADE_CHIME_VOLUME: f32 = 8.0;
+const OPEN_CASCADE_CHIME_PITCH: f32 = 1.2;
+
+/// C-major scale over a tenth, starting at 0.75. Taking the first N notes lets
+/// small fills stay low and big fills climb to a bright finish.
+const OPEN_CASCADE_PITCHES: [f32; OPEN_CASCADE_MAX_NOTES] = [
+    0.75, 0.84375, 0.9375, 1.0, 1.125, 1.25, 1.40625, 1.5, 1.6875, 1.875,
+];
+
+struct OpenCascade {
+    world_name: String,
+    origin: Pos3,
+    positions: Vec<Pos3>,
+    big: bool,
+    next_tick: u64,
+    next_note: usize,
+}
+
+fn open_cascades() -> &'static Mutex<Vec<OpenCascade>> {
+    static CASCADES: OnceLock<Mutex<Vec<OpenCascade>>> = OnceLock::new();
+    CASCADES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn open_note_volume(note: usize, total: usize) -> f32 {
+    if note == 0 {
+        OPEN_CASCADE_NOTE_VOLUME
+    } else if note + 1 == total {
+        OPEN_CASCADE_FINAL_VOLUME
+    } else {
+        OPEN_CASCADE_MID_VOLUME
+    }
+}
+
+pub fn play_open_cascade(world: &World, origin: Pos3, opened: usize, mut positions: Vec<Pos3>) {
+    if positions.is_empty() {
+        return;
+    }
+    // sqrt(64) = 8, so the 1.25 factor makes 64 cells hit the 10-note cap.
+    let total_notes = ((opened as f64).sqrt() * 1.25).round() as usize;
+    let total_notes = total_notes
+        .clamp(OPEN_CASCADE_MIN_NOTES, OPEN_CASCADE_MAX_NOTES)
+        .min(positions.len());
+    positions.sort_by_key(|p| {
+        let dx = p.x as i64 - origin.x as i64;
+        let dy = p.y as i64 - origin.y as i64;
+        let dz = p.z as i64 - origin.z as i64;
+        dx * dx + dy * dy + dz * dz
+    });
+    let selected = if positions.len() <= total_notes {
+        positions
+    } else {
+        let last = positions.len() - 1;
+        (0..total_notes)
+            .map(|i| positions[i * last / (total_notes - 1)])
+            .collect()
+    };
+    let next_tick = crate::state::now_tick().saturating_add(1);
+    open_cascades()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(OpenCascade {
+            world_name: world.get_name(),
+            origin,
+            positions: selected,
+            big: opened >= OPEN_CASCADE_BIG_THRESHOLD,
+            next_tick,
+            next_note: 0,
+        });
+}
+
+pub fn tick_open_sounds(server: &Server, now: u64) {
+    let mut cascades = open_cascades().lock().unwrap_or_else(|e| e.into_inner());
+    let mut i = 0;
+    while i < cascades.len() {
+        let cascade = &mut cascades[i];
+        if now < cascade.next_tick {
+            i += 1;
+            continue;
+        }
+        let total = cascade.positions.len();
+        let note = cascade.next_note;
+        let pos = cascade.positions[note];
+        if let Some(world) = server.get_world_by_name(&cascade.world_name) {
+            if note == 0 && cascade.big {
+                play_named_sound_at_pitched(
+                    &world,
+                    cascade.origin,
+                    "block.note_block.bass",
+                    OPEN_CASCADE_BASS_VOLUME,
+                    OPEN_CASCADE_BASS_PITCH,
+                );
+            }
+            play_named_sound_at_pitched(
+                &world,
+                pos,
+                "block.note_block.bit",
+                open_note_volume(note, total),
+                OPEN_CASCADE_PITCHES[note],
+            );
+            world.spawn_particle(
+                Particle::Note,
+                (pos.x as f64 + 0.5, pos.y as f64 + 1.1, pos.z as f64 + 0.5),
+                (0.0, 0.0, 0.0),
+                0.0,
+                1,
+            );
+            if note + 1 == total {
+                play_named_sound_at_pitched(
+                    &world,
+                    pos,
+                    "block.amethyst_block.chime",
+                    OPEN_CASCADE_CHIME_VOLUME,
+                    OPEN_CASCADE_CHIME_PITCH,
+                );
+            }
+        }
+        cascade.next_note += 1;
+        if cascade.next_note >= total {
+            cascades.swap_remove(i);
+        } else {
+            cascade.next_tick = now.saturating_add(1);
+            i += 1;
+        }
+    }
+}
+
+pub fn play_open_strong(world: &World, pos: Pos3) {
+    play_named_sound(world, pos, "block.moss.break");
+}
+
+pub fn play_bomb(world: &World, pos: Pos3) {
+    play_named_sound_at(
+        world,
+        pos,
+        "crystalized:effect.shard.detonation",
+        CUSTOM_BOMB_VOLUME,
+    );
+    play_named_sound_at(world, pos, "entity.generic.explode", BOMB_EXPLOSION_VOLUME);
+    world.spawn_particle(
+        Particle::RaidOmen,
+        (pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5),
+        (0.7, 0.7, 0.7),
+        0.05,
+        64,
     );
 }
 

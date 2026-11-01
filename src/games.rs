@@ -8,7 +8,10 @@ use crate::{
         adjacent_3d, blank_board_2d, blank_board_3d, bomb_amount_2d, bomb_amount_3d,
         generate_board_2d_safe, generate_board_3d_safe, is_won,
     },
-    helpers::{self, Sound, is_air, play_sound, set_block, set_tile, tell},
+    helpers::{
+        self, Sound, is_air, play_bomb, play_open_cascade, play_open_strong, play_sound,
+        set_block, set_tile, tell,
+    },
     state::{
         self, FLAG_LOCK_TICKS, GameInstance, GameKind, MAX_BUILD_Y, MAX_GAMES_PER_PLAYER,
         MIN_BUILD_Y,
@@ -286,6 +289,9 @@ fn reveal_all(world: &World, game: &GameInstance) {
 fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
     // Iterative flood fill over empty cells.
     let dim = game.dim;
+    let start_pos = game.board[start.1 * dim + start.0].pos;
+    let mut opened = 0usize;
+    let mut opened_positions = Vec::new();
     let mut stack = vec![start];
     let mut visited = vec![false; dim * dim];
     while let Some((x, y)) = stack.pop() {
@@ -300,6 +306,8 @@ fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
         }
         cell.state = CellState::Opened;
         set_tile(world, cell.pos, cell.content);
+        opened += 1;
+        opened_positions.push(cell.pos);
         if cell.content == CellContent::Empty {
             for (ax, ay) in adjacent_2d(dim, x, y) {
                 let aidx = ay * dim + ax;
@@ -309,11 +317,17 @@ fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
             }
         }
     }
+    if opened > 1 {
+        play_open_cascade(world, start_pos, opened, opened_positions);
+    }
 }
 
 fn open_cell_3d(world: &World, game: &mut GameInstance, start: (usize, usize, usize)) {
     let dim = game.dim;
     let at = |x: usize, y: usize, z: usize| (z * dim + y) * dim + x;
+    let start_pos = game.board[at(start.0, start.1, start.2)].pos;
+    let mut opened = 0usize;
+    let mut opened_positions = Vec::new();
     let mut stack = vec![start];
     let mut visited = vec![false; dim * dim * dim];
     while let Some((x, y, z)) = stack.pop() {
@@ -328,6 +342,8 @@ fn open_cell_3d(world: &World, game: &mut GameInstance, start: (usize, usize, us
         }
         cell.state = CellState::Opened;
         set_tile(world, cell.pos, cell.content);
+        opened += 1;
+        opened_positions.push(cell.pos);
         if cell.content == CellContent::Empty {
             for (ax, ay, az) in adjacent_3d(dim, x, y, z) {
                 let aidx = at(ax, ay, az);
@@ -336,6 +352,9 @@ fn open_cell_3d(world: &World, game: &mut GameInstance, start: (usize, usize, us
                 }
             }
         }
+    }
+    if opened > 1 {
+        play_open_cascade(world, start_pos, opened, opened_positions);
     }
 }
 
@@ -452,7 +471,7 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
         match game.board[idx].content {
             CellContent::Bomb => {
                 let pos = game.board[idx].pos;
-                play_sound(world, pos, Sound::EntityGenericExplode);
+                play_bomb(world, pos);
                 reveal_all(world, game);
                 game.is_over = true;
                 game.is_won = false;
@@ -460,7 +479,7 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
             }
             CellContent::Empty => {
                 let cell_pos = game.board[idx].pos;
-                play_sound(world, cell_pos, Sound::EntityFrogStep);
+                play_open_strong(world, cell_pos);
                 let (x, y, z) = locate(game, idx);
                 match game.kind {
                     GameKind::TwoD => open_cell_2d(world, game, (x, y)),
@@ -477,7 +496,7 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
                 let pos = game.board[idx].pos;
                 game.board[idx].state = CellState::Opened;
                 set_tile(world, pos, game.board[idx].content);
-                play_sound(world, pos, Sound::EntityFrogStep);
+                play_open_strong(world, pos);
                 if is_won(&game.board) {
                     play_sound(world, pos, Sound::ItemGoatHornSound1);
                     game.is_over = true;
