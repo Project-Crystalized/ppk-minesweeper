@@ -11,9 +11,7 @@ use pumpkin_plugin_api::{
 };
 
 use crate::{
-    core::{
-        infinite_is_bomb, infinite_number_at, CellContent, Pos3, COVERED_BLOCK,
-    },
+    core::{COVERED_BLOCK, CellContent, Pos3, infinite_is_bomb, infinite_number_at},
     helpers::{
         Sound, block_is, block_name, is_air, play_bomb, play_open_cascade, play_open_strong,
         play_sound, set_block, set_tile, tell, to_block_pos, uuid_key,
@@ -142,7 +140,10 @@ pub fn teleport_here(player: &Player, server: &Server) {
         set_block(&world, pad, COVERED_BLOCK);
     }
     player.teleport((8.5, ty as f64, 8.5), None, None, world);
-    tell(player, "Welcome to infinite minesweeper! Open cells, avoid TNT.");
+    tell(
+        player,
+        "Welcome to infinite minesweeper! Open cells, avoid TNT.",
+    );
 }
 
 /// Left-click in the infinite world. Returns true if intercepted.
@@ -187,7 +188,7 @@ pub fn handle_break(
                     break;
                 }
                 let cell_pos = Pos3::new(cx, BOARD_Y, cz);
-                if !is_covered(&block_name(world, to_block_pos(cell_pos))) {
+                if !is_hidden(&block_name(world, to_block_pos(cell_pos))) {
                     continue;
                 }
                 let cell_content = content_at(cx, cz);
@@ -239,10 +240,7 @@ pub fn handle_break(
             if let Some(milestone) = crossed_milestone(before, after) {
                 let name = player.get_name();
                 for p in server.get_all_players() {
-                    tell(
-                        &p,
-                        &format!("{name} has reached a streak of {milestone}."),
-                    );
+                    tell(&p, &format!("{name} has reached a streak of {milestone}."));
                 }
             }
             true
@@ -314,6 +312,10 @@ fn is_covered(name: &str) -> bool {
     block_is(name, COVERED_BLOCK)
 }
 
+fn is_hidden(name: &str) -> bool {
+    is_covered(name) || is_flag_wool(name)
+}
+
 fn is_flag_wool(name: &str) -> bool {
     crate::state::FLAG_STYLE_ORDER
         .iter()
@@ -360,6 +362,15 @@ mod tests {
         assert!(is_covered("moss_block"));
         assert!(!is_covered("minecraft:red_wool"));
         assert!(!is_covered("minecraft:tnt"));
+    }
+
+    #[test]
+    fn flood_fill_treats_flags_as_hidden() {
+        assert!(is_hidden("minecraft:moss_block"));
+        assert!(is_hidden("minecraft:red_wool"));
+        assert!(is_hidden("red_wool"));
+        assert!(!is_hidden("minecraft:stone"));
+        assert!(!is_hidden("minecraft:tnt"));
     }
 
     #[test]

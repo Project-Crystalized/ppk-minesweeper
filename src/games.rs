@@ -286,6 +286,10 @@ fn reveal_all(world: &World, game: &GameInstance) {
     }
 }
 
+fn flood_openable(state: CellState) -> bool {
+    state != CellState::Opened
+}
+
 fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
     // Iterative flood fill over empty cells.
     let dim = game.dim;
@@ -301,7 +305,7 @@ fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
         }
         visited[idx] = true;
         let cell = &mut game.board[idx];
-        if cell.state != CellState::Closed {
+        if !flood_openable(cell.state) {
             continue;
         }
         cell.state = CellState::Opened;
@@ -311,7 +315,7 @@ fn open_cell_2d(world: &World, game: &mut GameInstance, start: (usize, usize)) {
         if cell.content == CellContent::Empty {
             for (ax, ay) in adjacent_2d(dim, x, y) {
                 let aidx = ay * dim + ax;
-                if !visited[aidx] && game.board[aidx].state == CellState::Closed {
+                if !visited[aidx] && flood_openable(game.board[aidx].state) {
                     stack.push((ax, ay));
                 }
             }
@@ -337,9 +341,11 @@ fn open_cell_3d(world: &World, game: &mut GameInstance, start: (usize, usize, us
         }
         visited[idx] = true;
         let cell = &mut game.board[idx];
-        if cell.state != CellState::Closed {
+        if !flood_openable(cell.state) {
             continue;
         }
+        // Flagged cells are safe to reveal here: flood fill only expands out
+        // of Empty cells, whose neighbours are guaranteed bomb-free.
         cell.state = CellState::Opened;
         set_tile(world, cell.pos, cell.content);
         opened += 1;
@@ -347,7 +353,7 @@ fn open_cell_3d(world: &World, game: &mut GameInstance, start: (usize, usize, us
         if cell.content == CellContent::Empty {
             for (ax, ay, az) in adjacent_3d(dim, x, y, z) {
                 let aidx = at(ax, ay, az);
-                if !visited[aidx] && game.board[aidx].state == CellState::Closed {
+                if !visited[aidx] && flood_openable(game.board[aidx].state) {
                     stack.push((ax, ay, az));
                 }
             }
@@ -821,6 +827,13 @@ mod tests {
             is_over: false,
             is_won: false,
         }
+    }
+
+    #[test]
+    fn flood_fill_reveals_flagged_cells() {
+        assert!(flood_openable(CellState::Closed));
+        assert!(flood_openable(CellState::Flagged));
+        assert!(!flood_openable(CellState::Opened));
     }
 
     #[test]
