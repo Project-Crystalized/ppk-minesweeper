@@ -12,7 +12,7 @@ use crate::{games::NewGameSpec, helpers::uuid_key, state::GameKind};
 
 fn help_text() -> TextComponent {
     TextComponent::text(&format!(
-        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. Lock/unlock with the horse-armor item. Right-click the wool item to cycle flag colors; left-click it to reset to red. /ms clear removes your games. /ms clearnearest (admin) clears the closest board. /ms stats shows your records. /ms top shows leaderboards. /ms infinite teleports to endless mode.",
+        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. Lock/unlock with the horse-armor item. Right-click the wool item to cycle flag colors; left-click it to reset to red. /ms clear removes your games. /ms clearnearest (admin) clears the closest board. /ms stats shows your records. /ms infinite teleports to endless mode.",
         crate::games::NewGameSpec::all_labels()
     ))
 }
@@ -196,6 +196,57 @@ impl CommandHandler for ClearNearestCommand {
                 Ok(0)
             }
         }
+    }
+}
+
+pub struct FloodFillSoundCommand;
+
+impl CommandHandler for FloodFillSoundCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let requested = match args.get_value("sound") {
+            Arg::Simple(sound) | Arg::Msg(sound) => sound,
+            _ => String::new(),
+        };
+        if requested.is_empty() {
+            sender.send_message(TextComponent::text(&format!(
+                "Flood-fill sound: {}. Use /ms floodfillsound <sound> to change it (default: {}).",
+                crate::helpers::open_cascade_sound(),
+                crate::helpers::OPEN_CASCADE_DEFAULT_SOUND
+            )));
+            return Ok(1);
+        }
+
+        use pumpkin_plugin_api::command_wit::PermissionLevel;
+        if !sender.has_permission_level(PermissionLevel::Three) {
+            sender.send_error(TextComponent::text(
+                "You need admin permission (level 3) to change the flood-fill sound.",
+            ));
+            return Ok(0);
+        }
+
+        let requested = requested.trim().trim_start_matches("minecraft:");
+        let sound = if requested.eq_ignore_ascii_case("default")
+            || requested.eq_ignore_ascii_case("reset")
+        {
+            crate::helpers::OPEN_CASCADE_DEFAULT_SOUND
+        } else {
+            requested
+        };
+        if sound.is_empty() {
+            sender.send_error(TextComponent::text("Sound name cannot be empty."));
+            return Ok(0);
+        }
+
+        crate::helpers::set_open_cascade_sound(sound);
+        sender.send_message(TextComponent::text(&format!(
+            "Flood-fill sound set to {sound}."
+        )));
+        Ok(1)
     }
 }
 

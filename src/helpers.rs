@@ -194,12 +194,14 @@ pub fn action_bar_component(player: &Player, comp: TextComponent) {
     player.send_system_message(comp, true);
 }
 
-const SOUND_VOLUME: f32 = 20.0;
-/// The shard detonation is the main bomb hit, so push it above the old
-/// full-volume cue.
-const CUSTOM_BOMB_VOLUME: f32 = 32.0;
+/// Minecraft fades positional sounds out at roughly `volume * 16` blocks, so
+/// 1.25 keeps feedback audible to nearby players without carrying across the
+/// whole area.
+const SOUND_VOLUME: f32 = 1.25;
+/// The shard detonation is the main bomb hit.
+const CUSTOM_BOMB_VOLUME: f32 = 1.25;
 /// The vanilla explosion is only a low-end layer under the detonation.
-const BOMB_EXPLOSION_VOLUME: f32 = 2.0;
+const BOMB_EXPLOSION_VOLUME: f32 = 0.9;
 
 fn play_named_sound_at_pitched(world: &World, pos: Pos3, name: &str, volume: f32, pitch: f32) {
     world.play_custom_sound(
@@ -232,15 +234,35 @@ pub fn play_sound(world: &World, pos: Pos3, sound: Sound) {
     play_named_sound(world, pos, name);
 }
 
+pub const OPEN_CASCADE_DEFAULT_SOUND: &str = "block.note_block.cow_bell";
+
+fn open_cascade_sound_setting() -> &'static Mutex<String> {
+    static SOUND: OnceLock<Mutex<String>> = OnceLock::new();
+    SOUND.get_or_init(|| Mutex::new(OPEN_CASCADE_DEFAULT_SOUND.to_string()))
+}
+
+pub fn open_cascade_sound() -> String {
+    open_cascade_sound_setting()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+pub fn set_open_cascade_sound(name: &str) {
+    *open_cascade_sound_setting()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = name.to_string();
+}
+
 const OPEN_CASCADE_MIN_NOTES: usize = 2;
 const OPEN_CASCADE_MAX_NOTES: usize = 10;
 const OPEN_CASCADE_BIG_THRESHOLD: usize = 25;
-const OPEN_CASCADE_BASS_VOLUME: f32 = 9.0;
+const OPEN_CASCADE_BASS_VOLUME: f32 = 1.15;
 const OPEN_CASCADE_BASS_PITCH: f32 = 0.85;
-const OPEN_CASCADE_NOTE_VOLUME: f32 = 22.0;
-const OPEN_CASCADE_MID_VOLUME: f32 = 17.0;
-const OPEN_CASCADE_FINAL_VOLUME: f32 = 21.0;
-const OPEN_CASCADE_CHIME_VOLUME: f32 = 8.0;
+const OPEN_CASCADE_NOTE_VOLUME: f32 = 1.25;
+const OPEN_CASCADE_MID_VOLUME: f32 = 1.2;
+const OPEN_CASCADE_FINAL_VOLUME: f32 = 1.25;
+const OPEN_CASCADE_CHIME_VOLUME: f32 = 1.2;
 const OPEN_CASCADE_CHIME_PITCH: f32 = 1.2;
 
 /// C-major scale over a tenth, starting at 0.75. Taking the first N notes lets
@@ -312,6 +334,10 @@ pub fn play_open_cascade(world: &World, origin: Pos3, opened: usize, mut positio
 
 pub fn tick_open_sounds(server: &Server, now: u64) {
     let mut cascades = open_cascades().lock().unwrap_or_else(|e| e.into_inner());
+    if cascades.is_empty() {
+        return;
+    }
+    let sound = open_cascade_sound();
     let mut i = 0;
     while i < cascades.len() {
         let cascade = &mut cascades[i];
@@ -335,7 +361,7 @@ pub fn tick_open_sounds(server: &Server, now: u64) {
             play_named_sound_at_pitched(
                 &world,
                 pos,
-                "block.note_block.bit",
+                &sound,
                 open_note_volume(note, total),
                 OPEN_CASCADE_PITCHES[note],
             );

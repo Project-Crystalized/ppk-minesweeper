@@ -87,7 +87,7 @@ impl Plugin for MinesweeperPlugin {
             true,
         )?;
 
-        use pumpkin_plugin_api::command::ArgumentType;
+        use pumpkin_plugin_api::command::{ArgumentType, StringType};
         let cmd = Command::new(&["ms".to_string()], "Play minesweeper")
             .then(CommandNode::literal("help").execute(commands::HelpCommand))
             .then(CommandNode::literal("2d").then(
@@ -103,6 +103,17 @@ impl Plugin for MinesweeperPlugin {
             .then(CommandNode::literal("clearnearest").execute(commands::ClearNearestCommand))
             .then(CommandNode::literal("stats").execute(commands::StatsCommand))
             .then(CommandNode::literal("top").execute(commands::TopCommand))
+            .then(
+                CommandNode::literal("floodfillsound")
+                    .execute(commands::FloodFillSoundCommand)
+                    .then(
+                        CommandNode::argument(
+                            "sound",
+                            &ArgumentType::String(StringType::SingleWord),
+                        )
+                        .execute(commands::FloodFillSoundCommand),
+                    ),
+            )
             .then(CommandNode::literal("infinite").execute(commands::InfiniteCommand))
             .execute(commands::RootCommand);
         if let Err(e) = context.register_permission(&Permission {
