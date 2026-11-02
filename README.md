@@ -46,12 +46,14 @@ boundaries are drawn with end-rod particles instead of air gaps.
 
 While you are near a Sudoku board, the hotbar is replaced by nine colored
 concrete blocks (white, yellow, orange, red, magenta, blue, cyan, lime,
-light gray for digits 1-9 - no purple or black, so every digit reads as a
+light pink for digits 1-9 - no purple or black, so every digit reads as a
 different color - and the same blocks the board uses for givens). Select slot
 1-9, then right-click an editable cell to place that digit; left-click a cell
 to clear it. Fixed givens cannot be changed. Leaving the board restores your
 previous hotbar/kit. The sidebar shows filled-cell progress, and the board is
 accepted as solved once every cell is filled without row/column/box conflicts.
+Generated boards are uniquely solvable: the generator blanks digits only
+while the board still has exactly one valid solution.
 Clicking your own solved board clears it. Boards need a free 9x9 area below
 the player and count toward the same 3-game limit.
 
