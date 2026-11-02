@@ -9,8 +9,8 @@ use crate::{
         generate_board_2d_safe, generate_board_3d_safe, is_won,
     },
     helpers::{
-        self, Sound, is_air, play_bomb, play_open_cascade, play_open_strong, play_sound,
-        set_block, set_tile, tell,
+        self, Sound, is_air, play_bomb, play_open_cascade, play_open_strong, play_sound, set_block,
+        set_tile, tell,
     },
     state::{
         self, FLAG_LOCK_TICKS, GameInstance, GameKind, MAX_BUILD_Y, MAX_GAMES_PER_PLAYER,
@@ -139,7 +139,9 @@ fn cells_of(spec: NewGameSpec, origin: Pos3) -> (GameKind, usize, Vec<core::Cell
 
 pub fn create_game(player: &Player, spec: NewGameSpec) {
     let owner = helpers::uuid_key(player);
-    if state::player_game_count(owner) >= MAX_GAMES_PER_PLAYER {
+    if state::player_game_count(owner) + crate::sudoku::player_game_count(owner)
+        >= MAX_GAMES_PER_PLAYER
+    {
         tell(
             player,
             "You can't have more than 3 games active (/ms clear).",
@@ -224,6 +226,7 @@ pub fn clear_player_games(player: &Player, server: &pumpkin_plugin_api::Server) 
         }
         n += 1;
     }
+    n += crate::sudoku::clear_player_games(player, server);
     tell(player, &format!("Cleared {n} game(s)."));
 }
 
@@ -246,25 +249,33 @@ pub fn clear_game_in_world(world: &World, id: u32) {
 /// feedback, or `None` when the current world has no boards.
 pub fn admin_clear_nearest(world: &World, pos: (f64, f64, f64)) -> Option<(u32, String, String)> {
     let world_id = world.get_id();
-    let (_, game) = state::all_games_detailed()
+    let mine = state::all_games_detailed()
         .into_iter()
         .filter(|g| g.world_id == world_id)
         .map(|g| {
             let dx = g.center.x as f64 - pos.0;
             let dy = g.center.y as f64 - pos.1;
             let dz = g.center.z as f64 - pos.2;
-            (dx * dx + dy * dy + dz * dz, g)
+            let label = NewGameSpec {
+                kind: g.kind,
+                dim: g.dim,
+            }
+            .label();
+            (dx * dx + dy * dy + dz * dz, g.id, g.owner_name, label)
         })
-        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)))?;
-    let label = NewGameSpec {
-        kind: game.kind,
-        dim: game.dim,
+        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let sudoku = crate::sudoku::nearest_candidate(&world_id, pos)
+        .map(|(d2, s)| (d2, s.id, s.owner_name, "Sudoku".to_string()));
+    let (_, id, owner_name, label) = [mine, sudoku]
+        .into_iter()
+        .flatten()
+        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))?;
+    if label == "Sudoku" {
+        return crate::sudoku::admin_clear_nearest(world, pos);
     }
-    .label();
-    let owner_name = game.owner_name.clone();
-    record_game_end(game.id, true);
-    clear_game_in_world(world, game.id);
-    Some((game.id, owner_name, label))
+    record_game_end(id, true);
+    clear_game_in_world(world, id);
+    Some((id, owner_name, label))
 }
 
 fn reveal_all(world: &World, game: &GameInstance) {
@@ -752,6 +763,7 @@ pub fn describe_all_for(owner_filter: Option<crate::state::UuidKey>) -> String {
             locked = if g.locked { " locked" } else { "" },
         ));
     }
+    lines.extend(crate::sudoku::descriptions(owner_filter));
     if lines.is_empty() {
         "No games.".to_string()
     } else {
@@ -759,24 +771,33 @@ pub fn describe_all_for(owner_filter: Option<crate::state::UuidKey>) -> String {
     }
 }
 
-/// Toggle locks. With `id`: that game only (owner only). Without: all owned.
-/// Returns a human-readable report line.
+/// Toggle locks. With `id`: that game only (owner only). Without: all owned
+/// minesweeper and Sudoku games. Returns a human-readable report line.
 pub fn toggle_lock_report(who: crate::state::UuidKey, id: Option<u32>) -> String {
     match id {
-        Some(id) => match state::toggle_lock(id, who) {
-            Some(locked) => format!("Game #{id} {}.", if locked { "locked" } else { "unlocked" }),
-            None => format!("No owned game #{id} to lock."),
-        },
-        None => {
-            let (n, locked) = state::toggle_all_locks(who);
-            if n == 0 {
-                "You have no games to lock.".to_string()
-            } else {
-                format!(
-                    "{n} game(s) {}.",
-                    if locked { "locked" } else { "unlocked" }
-                )
+        Some(id) => {
+            if let Some(locked) = state::toggle_lock(id, who) {
+                return format!("Game #{id} {}.", if locked { "locked" } else { "unlocked" });
             }
+            if let Some(locked) = crate::sudoku::toggle_lock(id, who) {
+                return format!(
+                    "Sudoku #{id} {}.",
+                    if locked { "locked" } else { "unlocked" }
+                );
+            }
+            format!("No owned game #{id} to lock.")
+        }
+        None => {
+            let total = state::player_game_count(who) + crate::sudoku::player_game_count(who);
+            if total == 0 {
+                return "You have no games to lock.".to_string();
+            }
+            let target = state::any_unlocked(who) || crate::sudoku::any_unlocked(who);
+            let n = state::set_all_locks(who, target) + crate::sudoku::set_all_locks(who, target);
+            format!(
+                "{n} game(s) {}.",
+                if target { "locked" } else { "unlocked" }
+            )
         }
     }
 }

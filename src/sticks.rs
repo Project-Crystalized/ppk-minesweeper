@@ -1,8 +1,6 @@
 //! Starter sticks: named sticks that start games on right-click.
 
-use pumpkin_plugin_api::{
-    common::Hand, text::TextComponent, ItemStack, ItemStackExt, Player,
-};
+use pumpkin_plugin_api::{ItemStack, ItemStackExt, Player, common::Hand, text::TextComponent};
 
 use crate::games::NewGameSpec;
 
@@ -16,6 +14,7 @@ const STARTERS: [(&str, NewGameSpec); 4] = [
 pub const LOCKED_NAME: &str = "Game is Locked";
 pub const UNLOCKED_NAME: &str = "Game is Unlocked";
 pub const FLAG_SWITCH_NAME: &str = "Switch flag color";
+pub const SUDOKU_NAME: &str = "Sudoku";
 
 pub enum HeldSpecial {
     LockToggle,
@@ -37,6 +36,13 @@ pub fn starter_for(stack: &ItemStack) -> Option<NewGameSpec> {
         .iter()
         .find(|(name, _)| *name == text)
         .map(|(_, spec)| *spec)
+}
+
+pub fn is_sudoku_stick(stack: &ItemStack) -> bool {
+    stack.matches_item("stick")
+        && stack
+            .get_custom_name()
+            .is_some_and(|name| name.get_text() == SUDOKU_NAME)
 }
 
 pub fn special_for(stack: &ItemStack) -> Option<HeldSpecial> {
@@ -102,41 +108,31 @@ pub fn held_starter(player: &Player) -> Option<NewGameSpec> {
     None
 }
 
-/// Pumpkin storage layout: `get/set_inventory_item` address the raw
-/// `PlayerInventory`, where **0-35 is the main inventory with 0-8 as the
-/// hotbar**, 36-39 are armor, and 40 is the offhand.
-///
-/// Pumpkin 0.2.1's plugin host syncs writes through
-/// `Player::sync_hand_slot`, sending the raw storage index in
-/// `CSetPlayerInventory` and refreshing the player screen. That makes
-/// hotbar slots 0-8 safe to write directly (older hosts used the raw index
-/// as a window slot and needed the main-grid workaround).
-pub const OFFHAND_SLOT: u8 = 40;
-const LOCK_SLOT: u8 = 7;
-const FLAG_SLOT: u8 = 8;
+pub fn held_sudoku(player: &Player) -> bool {
+    [Hand::Right, Hand::Left]
+        .into_iter()
+        .filter_map(|hand| player.get_item_in_hand(hand))
+        .any(|stack| is_sudoku_stick(&stack))
+}
 
-/// Fixed hotbar layout: four starters in slots 0-3, then the lock toggle
-/// and flag color switcher in slots 7-8. Slots 4-6 stay empty.
-fn kit_layout(player: &Player) -> [(u8, ItemStack); 6] {
-    use crate::helpers::uuid_key;
-    let key = uuid_key(player);
-    let any_locked = crate::state::all_games_detailed()
-        .iter()
-        .any(|g| g.owner == key && g.locked);
+pub const OFFHAND_SLOT: u8 = 40;
+const SUDOKU_SLOT: u8 = 4;
+pub const UTILITY_LOCK_SLOT: u8 = 7;
+pub const UTILITY_FLAG_SLOT: u8 = 8;
+
+/// The default kit: only the starter sticks. Sticks for the four
+/// minesweeper sizes in slots 0-3, Sudoku in slot 4.
+fn kit_layout() -> [(u8, ItemStack); 5] {
     [
         (0, make_stick(STARTERS[0].0)),
         (1, make_stick(STARTERS[1].0)),
         (2, make_stick(STARTERS[2].0)),
         (3, make_stick(STARTERS[3].0)),
-        (LOCK_SLOT, make_lock_item(any_locked)),
-        (
-            FLAG_SLOT,
-            make_flag_item(crate::state::flag_block_for(key)),
-        ),
+        (SUDOKU_SLOT, make_stick(SUDOKU_NAME)),
     ]
 }
 
-/// Wipe main/armor/offhand, then lay out the 6-piece hotbar kit. Slots 41+
+/// Wipe main/armor/offhand, then lay out the 5-stick hotbar kit. Slots 41+
 /// are never touched (the client would render ghost duplicates there).
 pub fn give_fresh_kit(player: &Player) -> usize {
     player.get_inventory().clear_all();
@@ -144,11 +140,31 @@ pub fn give_fresh_kit(player: &Player) -> usize {
         player.set_inventory_item(slot, None);
     }
     let mut given = 0;
-    for (slot, stack) in kit_layout(player) {
+    for (slot, stack) in kit_layout() {
         player.set_inventory_item(slot, Some(stack));
         given += 1;
     }
     given
+}
+
+/// Hotbar-mode layout for players standing at a minesweeper board: the
+/// utility items only (lock toggle + flag color switcher). The hotbar is
+/// cleared first so no sticks or leftover items linger — entering the mode
+/// already saved the player's real hotbar and leaving restores it.
+pub fn apply_utility_items(player: &Player) {
+    for slot in 0..9u8 {
+        player.set_inventory_item(slot, None);
+    }
+    let key = crate::helpers::uuid_key(player);
+    let any_locked = crate::state::all_games_detailed()
+        .iter()
+        .any(|g| g.owner == key && g.locked)
+        || crate::sudoku::any_locked(key);
+    player.set_inventory_item(UTILITY_LOCK_SLOT, Some(make_lock_item(any_locked)));
+    player.set_inventory_item(
+        UTILITY_FLAG_SLOT,
+        Some(make_flag_item(crate::state::flag_block_for(key))),
+    );
 }
 
 /// Update the hotbar utility item names to the current lock state/flag color.
@@ -157,7 +173,8 @@ pub fn refresh_utility_items(player: &Player) {
     let key = uuid_key(player);
     let any_locked = crate::state::all_games_detailed()
         .iter()
-        .any(|g| g.owner == key && g.locked);
+        .any(|g| g.owner == key && g.locked)
+        || crate::sudoku::any_locked(key);
     let flag_block = crate::state::flag_block_for(key);
     for slot in 0..=OFFHAND_SLOT {
         let Some(stack) = player.get_inventory_item(slot) else {

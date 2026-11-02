@@ -30,7 +30,8 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
         _server: Server,
         event: EventData<PlayerJoinEvent>,
     ) -> EventData<PlayerJoinEvent> {
-        // Fresh kit: wipe stale slots, then lay out the hotbar kit.
+        // Fresh kit: wipe stale slots, then lay out the sticks-only kit.
+        crate::hotbar::forget(crate::helpers::uuid_key(&event.player));
         crate::sticks::give_fresh_kit(&event.player);
         crate::state::mark_join(crate::helpers::uuid_key(&event.player));
         crate::db::touch_player(
@@ -41,10 +42,14 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
             crate::helpers::uuid_key(&event.player),
             &event.player.get_name(),
         );
+        crate::sudoku::update_owner_name(
+            crate::helpers::uuid_key(&event.player),
+            &event.player.get_name(),
+        );
         crate::infinite::hydrate_session(&event.player);
         tell(
             &event.player,
-            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-4 and right-click to play, or /ms help. Right-click the wool to cycle flag colors; left-click it to reset to red. Building, breaking and mob spawning are disabled.",
+            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-5 and right-click to play (slot 5 is Sudoku), or /ms help. Near one of your boards the hotbar swaps to the lock and flag color items. Right-click the wool it gives you to cycle flag colors; left-click it to reset to red. Building, breaking and mob spawning are disabled.",
         );
         event
     }
@@ -59,6 +64,7 @@ impl EventHandler<PlayerLeaveEvent> for LeaveListener {
         event: EventData<PlayerLeaveEvent>,
     ) -> EventData<PlayerLeaveEvent> {
         let owner = uuid_key(&event.player);
+        crate::hotbar::leave(&event.player);
         crate::sidebar::clear(&event.player);
         // Boards deliberately survive disconnects: an owner coming back keeps
         // their progress, and helpers can keep playing unlocked boards.
@@ -82,6 +88,14 @@ impl EventHandler<BlockBreakEvent> for BreakListener {
         let world = player.get_world();
         let world_id = world.get_id();
         let pos = to_pos3(event.block_pos);
+
+        if let Some((id, idx)) = crate::sudoku::route(&world_id, pos) {
+            crate::sudoku::click_left(&world, player, id, idx);
+            event.cancelled = true;
+            event.should_drop = false;
+            event.exp = 0;
+            return event;
+        }
 
         // Bedrock does not fire PlayerInteractEvent for block clicks.
         if let Some(crate::sticks::HeldSpecial::FlagCycle) = crate::sticks::held_special(player) {
@@ -187,6 +201,20 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
                 return event;
             }
         }
+        // Sudoku board clicks win over every held item, so the Sudoku stick
+        // can stay in hand while playing.
+        if event.action == InteractAction::RightClickBlock {
+            if let Some(clicked) = event.clicked_pos {
+                let world = event.player.get_world();
+                let world_id = world.get_id();
+                let pos = to_pos3(clicked);
+                if let Some((id, idx)) = crate::sudoku::route(&world_id, pos) {
+                    crate::sudoku::click_right(&world, &event.player, id, idx);
+                    event.cancelled = true;
+                    return event;
+                }
+            }
+        }
         // Starter sticks win over flagging.
         if let Some(spec) = crate::sticks::held_starter(&event.player) {
             crate::games::create_game(&event.player, spec);
@@ -218,9 +246,17 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
             return event;
         }
         if event.action != InteractAction::RightClickBlock {
+            if crate::sticks::held_sudoku(&event.player) {
+                crate::sudoku::create_game(&event.player);
+                event.cancelled = true;
+            }
             return event;
         }
         let Some(clicked) = event.clicked_pos else {
+            if crate::sticks::held_sudoku(&event.player) {
+                crate::sudoku::create_game(&event.player);
+                event.cancelled = true;
+            }
             return event;
         };
         let world = event.player.get_world();
@@ -236,6 +272,12 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
         if infinite::is_infinite_world(&world)
             && infinite::handle_interact(&world, &event.player, pos.x, pos.y, pos.z)
         {
+            event.cancelled = true;
+            return event;
+        }
+
+        if crate::sticks::held_sudoku(&event.player) {
+            crate::sudoku::create_game(&event.player);
             event.cancelled = true;
         }
         event

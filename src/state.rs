@@ -7,8 +7,8 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
         Mutex, OnceLock,
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -224,8 +224,14 @@ fn lock() -> std::sync::MutexGuard<'static, State> {
     state().lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Reserve an id shared by every game type (minesweeper and Sudoku), so
+/// `/ms list` and lock messages never show duplicate numbers.
+pub fn next_id() -> u32 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 pub fn insert_game(game: GameInstance) -> u32 {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let id = next_id();
     let mut s = lock();
     let index = s.pos_index.entry(game.world_id.clone()).or_default();
     for cell in &game.board {
@@ -244,11 +250,7 @@ pub fn with_game_mut<R>(id: u32, f: impl FnOnce(&mut GameInstance) -> R) -> Opti
 }
 
 pub fn game_id_at(world_id: &str, x: i32, y: i32, z: i32) -> Option<u32> {
-    lock()
-        .pos_index
-        .get(world_id)?
-        .get(&(x, y, z))
-        .copied()
+    lock().pos_index.get(world_id)?.get(&(x, y, z)).copied()
 }
 
 pub fn player_game_count(owner: UuidKey) -> usize {
@@ -380,9 +382,11 @@ pub fn toggle_lock(id: u32, who: UuidKey) -> Option<bool> {
 /// Toggle all games owned by `who`. Returns `(toggled, now_locked)`.
 /// `now_locked` is the state after toggling when at least one game exists;
 /// all games end up in the same state (lock if any unlocked, else unlock).
+#[cfg(test)]
 pub fn toggle_all_locks(who: UuidKey) -> (usize, bool) {
     let mut s = lock();
-    let mut owned: Vec<&mut GameInstance> = s.games.values_mut().filter(|g| g.owner == who).collect();
+    let mut owned: Vec<&mut GameInstance> =
+        s.games.values_mut().filter(|g| g.owner == who).collect();
     if owned.is_empty() {
         return (0, false);
     }
@@ -391,6 +395,23 @@ pub fn toggle_all_locks(who: UuidKey) -> (usize, bool) {
         g.locked = target;
     }
     (owned.len(), target)
+}
+
+/// Whether any owned game is currently unlocked. Used to combine the
+/// minesweeper and Sudoku lock toggles into one kit-wide action.
+pub fn any_unlocked(who: UuidKey) -> bool {
+    lock().games.values().any(|g| g.owner == who && !g.locked)
+}
+
+/// Force every owned game to one lock state. Returns how many were changed.
+pub fn set_all_locks(who: UuidKey, locked: bool) -> usize {
+    let mut s = lock();
+    let mut n = 0;
+    for g in s.games.values_mut().filter(|g| g.owner == who) {
+        g.locked = locked;
+        n += 1;
+    }
+    n
 }
 
 /// (wool item/block suffix, full block name) in cycle order.
@@ -484,7 +505,7 @@ pub fn session(owner: UuidKey) -> Option<InfiniteSession> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{CellContent, CellState, Cell};
+    use crate::core::{Cell, CellContent, CellState};
 
     fn mk_game(owner: UuidKey, x0: i32, locked: bool) -> GameInstance {
         let cells = vec![
@@ -535,15 +556,9 @@ mod tests {
     fn owner_name_refreshes_on_rename() {
         let owner = (0xAAA1_0006, 0xBBB1_0006);
         let id = insert_game(mk_game(owner, 50_101, false));
-        assert_eq!(
-            with_game(id, |g| g.owner_name.clone()).unwrap(),
-            "owner"
-        );
+        assert_eq!(with_game(id, |g| g.owner_name.clone()).unwrap(), "owner");
         update_owner_name(owner, "renamed");
-        assert_eq!(
-            with_game(id, |g| g.owner_name.clone()).unwrap(),
-            "renamed"
-        );
+        assert_eq!(with_game(id, |g| g.owner_name.clone()).unwrap(), "renamed");
         remove_game(id);
     }
 

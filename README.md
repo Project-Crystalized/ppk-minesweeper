@@ -11,6 +11,7 @@ inside Pumpkin instead of as its own server.
 | `/ms help` | Show help |
 | `/ms 2d <size>` | Start a flat board with custom dimension (2+) |
 | `/ms 3d <size>` | Start a 3D cube with custom dimension (2+) |
+| `/ms sudoku` | Start a 9x9 Sudoku board at your feet |
 | `/ms clear` | Remove all your games (unfinished ones logged as losses, blocks cleared) |
 | `/ms clearnearest` | Admin: clear the closest board in your world |
 | `/ms list` | List your games (kind, dim, locks, helpers) |
@@ -21,21 +22,44 @@ inside Pumpkin instead of as its own server.
 Left-click a cell to open it, right-click toggles a flag with your own color.
 Flagged/open cells ignore left-clicks (flagged bombs can't explode). Only
 opening a cell adds you as a helper; flagging alone does not.
-Your starter sticks (20x20, 40x40, 3D 5x5, 3D 7x7), lock toggle and flag
-switcher are pre-placed in the hotbar. Lock/unlock with the horse-armor item.
-Right-click the wool item to cycle through 12 flag colors; left-click it to
-reset to red. Locked games only respond to their owner;
+Your starter sticks (20x20, 40x40, 3D 5x5, 3D 7x7) and the Sudoku stick are
+placed in hotbar slots 1-5 — that is the entire default kit; the lock toggle and flag
+switcher are not part of it. While you are near a minesweeper board, the
+hotbar swaps to just those two items (lock toggle in slot 1, flag color
+switcher in slot 2; sticks are hidden so you can't start a messy board while
+inside one). Entering either board mode saves your whole hotbar; stepping
+away restores it. Lock/unlock with the horse-armor item. Right-click the wool
+item to cycle through 12 flag colors; left-click it to reset to red. Locked
+games only respond to their owner;
 clicking your own finished board clears it. Boards survive disconnects: the
 owner keeps their progress and helpers can continue unlocked games, while the
 owner's timer is paused until they return. Max 3 active games per player. A
-per-second sidebar shows the nearest board, its owner, time, bombs and flags.
-Infinite mode tracks streaks with color tiers and 500/1000 broadcasts.
+per-second sidebar shows the nearest board, its owner, time, and progress
+(bombs/flags for minesweeper, filled cells for Sudoku). Infinite mode tracks
+streaks with color tiers and 500/1000 broadcasts.
+
+### Sudoku
+
+Right-click the Sudoku stick (hotbar slot 5) or run `/ms sudoku` to spawn a
+9x9 board below you. The nine cells in each 3x3 box are contiguous; the box
+boundaries are drawn with end-rod particles instead of air gaps.
+
+While you are near a Sudoku board, the hotbar is replaced by nine colored
+concrete blocks (white, yellow, orange, red, magenta, blue, cyan, lime,
+light gray for digits 1-9 - no purple or black, so every digit reads as a
+different color - and the same blocks the board uses for givens). Select slot
+1-9, then right-click an editable cell to place that digit; left-click a cell
+to clear it. Fixed givens cannot be changed. Leaving the board restores your
+previous hotbar/kit. The sidebar shows filled-cell progress, and the board is
+accepted as solved once every cell is filled without row/column/box conflicts.
+Clicking your own solved board clears it. Boards need a free 9x9 area below
+the player and count toward the same 3-game limit.
 
 ## Persistence (SQLite)
 
-Finished sized games, including boards explicitly abandoned with `/ms clear`,
-plus infinite-mode lifetime totals are recorded in a single SQLite file,
-following the `LsDatabase` conventions (one file,
+Finished minesweeper and Sudoku games, including boards explicitly abandoned
+with `/ms clear`, plus infinite-mode lifetime totals are recorded in a single
+SQLite file, following the `LsDatabase` conventions (one file,
 `CREATE TABLE IF NOT EXISTS`, fail-soft: a broken DB disables recording, the
 game keeps running):
 
@@ -43,11 +67,11 @@ game keeps running):
   history, first/last seen, lifetime online playtime in ticks). Names on
   leaderboards are resolved from here, so renames show up immediately.
 - `MsGames`: one row per finished or abandoned game: `kind` (0 = 2D,
-  1 = 3D), `dim`, final board `seed`, `time_ticks`, `outcome`
+  1 = 3D, 2 = Sudoku), `dim`, final board `seed`, `time_ticks`, `outcome`
   (0 = loss, 1 = win; abandoned games are stored as losses), bombs, flags,
-  flags placed, cells opened, left-clicks, helper count, locked flag,
-  epoch end time and board origin `x/y/z`. The world a game was played in is
-  deliberately not stored.
+  flags placed, cells opened (filled cells for Sudoku), left-clicks, helper
+  count, locked flag, epoch end time and board origin `x/y/z`. The world a
+  game was played in is deliberately not stored.
 - `MsGamePlayers`: game roster (`is_owner` 1/0), which powers co-op credit.
 - `MsInfiniteStats`: lifetime infinite totals per player (best streak, cells
   opened, bombs clicked, playtime, last played). Only totals persist; the
@@ -159,7 +183,8 @@ permission (unless blocked in server config, the manifest request applies).
   covered board; content is a deterministic hash of `(x, z)`, not OpenSimplex.
 - `PostgresWrapper` / armor-stand leaderboards → SQLite records (`src/db.rs`)
   with `/ms stats` + `/ms top` instead of holograms.
-- Pure board logic in `src/core.rs` has unit tests; no engine deps.
+- Pure board logic in `src/core.rs` (minesweeper) and `src/sudoku.rs`
+  (generation, conflicts, win check) has unit tests; no engine deps.
 - No extra crates: board RNG is an internal splitmix64, so `wasm32-wasip2`
   builds stay dependency-free.
 
@@ -168,6 +193,13 @@ permission (unless blocked in server config, the manifest request applies).
 - [ ] `/ms 2d20` builds a moss board above the player and reports coords
 - [ ] Left-click opens / flood-fills; first click never a bomb
 - [ ] Right-click flags/unflags; win and bomb-reveal paths work
+- [ ] Open/flag work with the hotbar showing only the lock + flag items near
+  a minesweeper board, sticks are hidden, and stepping away restores the
+  sticks-only kit (the whole hotbar is cleared and re-laid out)
+- [ ] `/ms sudoku` and hotbar slot 5 spawn a 9x9 board; givens stay fixed,
+  the hotbar becomes digits 1-9 near the board, right-click places the selected
+  digit, left-click clears, and solving records a win
+- [ ] Sudoku 3x3 boundaries show end-rod particle lines with no air gaps
 - [ ] Disconnecting with active boards keeps them; the sidebar shows their owner
   and the owner's timer pauses while offline
 - [ ] `/ms infinite` creates/teleports to `ms_infinite` with moss terrain

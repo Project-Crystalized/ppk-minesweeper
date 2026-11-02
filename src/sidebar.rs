@@ -2,19 +2,12 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use pumpkin_plugin_api::{
-    text::TextComponent,
-    wit::pumpkin::plugin::{
-        common::NamedColor,
-        player::JavaPlayer,
-        scoreboard as sb,
-    },
     Player,
+    text::TextComponent,
+    wit::pumpkin::plugin::{common::NamedColor, player::JavaPlayer, scoreboard as sb},
 };
 
-use crate::{
-    helpers::uuid_key,
-    state,
-};
+use crate::{helpers::uuid_key, state};
 
 const MAX_LINES: usize = 10;
 const OBJECTIVE: &str = "ms_status";
@@ -106,10 +99,15 @@ pub fn clear(player: &Player) {
     }
 }
 
+pub enum Focus {
+    Minesweeper(u32),
+    Sudoku(crate::sudoku::Summary),
+}
+
 pub fn lines(
     player: &Player,
-    show_id: Option<u32>,
-    mine_count: usize,
+    focus: Option<Focus>,
+    game_count: usize,
     online: usize,
     infinite: bool,
 ) -> Vec<String> {
@@ -122,10 +120,18 @@ pub fn lines(
 
     if infinite {
         lines.extend(infinite_lines(player));
-    } else if let Some(game) = show_id.and_then(|id| game_lines(id, mine_count)) {
-        lines.extend(game);
     } else {
-        lines.extend(hint_lines());
+        match focus {
+            Some(Focus::Minesweeper(id)) => {
+                if let Some(game) = game_lines(id, game_count) {
+                    lines.extend(game);
+                } else {
+                    lines.extend(hint_lines());
+                }
+            }
+            Some(Focus::Sudoku(summary)) => lines.extend(sudoku_lines(&summary, game_count)),
+            None => lines.extend(hint_lines()),
+        }
     }
 
     lines.push(" ".to_string());
@@ -137,10 +143,37 @@ fn hint_lines() -> Vec<String> {
     vec![
         "§7No board nearby".to_string(),
         "§7Right-click a stick to play".to_string(),
+        "§7Slot 5: Sudoku".to_string(),
     ]
 }
 
-fn game_lines(id: u32, mine_count: usize) -> Option<Vec<String>> {
+fn sudoku_lines(g: &crate::sudoku::Summary, game_count: usize) -> Vec<String> {
+    let mut title = format!("§eSudoku §8#{} §7by §f{}", g.id, g.owner_name);
+    if g.locked {
+        title.push_str(" §7[locked]");
+    }
+    if game_count > 1 {
+        title.push_str(&format!(" §8+{} more", game_count - 1));
+    }
+
+    let mut lines = vec![
+        title,
+        format!("§bTime: §f{}", time_text(g.ticks)),
+        format!("§6Filled: §f{}/{}", g.filled, g.total),
+    ];
+    if g.over {
+        lines.push(if g.won {
+            "§aWON! §7Click the board to clear".to_string()
+        } else {
+            "§cFinished §7Click the board to clear".to_string()
+        });
+    } else if g.helpers > 0 {
+        lines.push(format!("§7Helpers: §f{}", g.helpers));
+    }
+    lines
+}
+
+fn game_lines(id: u32, game_count: usize) -> Option<Vec<String>> {
     state::with_game(id, |g| {
         let mut title = format!(
             "§e{} §8#{} §7by §f{}",
@@ -151,8 +184,8 @@ fn game_lines(id: u32, mine_count: usize) -> Option<Vec<String>> {
         if g.locked {
             title.push_str(" §7[locked]");
         }
-        if mine_count > 1 {
-            title.push_str(&format!(" §8+{} more", mine_count - 1));
+        if game_count > 1 {
+            title.push_str(&format!(" §8+{} more", game_count - 1));
         }
 
         let mut lines = vec![

@@ -134,7 +134,11 @@ fn generate_board_2d_avoiding(
 fn avoid_for_2d(dim: usize, safe: usize) -> Vec<usize> {
     let (sx, sy) = (safe % dim, safe / dim);
     let mut avoid = vec![safe];
-    avoid.extend(adjacent_2d(dim, sx, sy).into_iter().map(|(x, y)| y * dim + x));
+    avoid.extend(
+        adjacent_2d(dim, sx, sy)
+            .into_iter()
+            .map(|(x, y)| y * dim + x),
+    );
     avoid
 }
 
@@ -557,7 +561,10 @@ mod tests {
                     "3D dim={dim} safe={safe}"
                 );
                 assert_eq!(
-                    board.iter().filter(|c| c.content == CellContent::Bomb).count(),
+                    board
+                        .iter()
+                        .filter(|c| c.content == CellContent::Bomb)
+                        .count(),
                     bomb_amount_3d(dim),
                     "3D dim={dim} bomb count changed"
                 );
@@ -579,7 +586,10 @@ mod tests {
                     "2D dim={dim} safe={safe}"
                 );
                 assert_eq!(
-                    board.iter().filter(|c| c.content == CellContent::Bomb).count(),
+                    board
+                        .iter()
+                        .filter(|c| c.content == CellContent::Bomb)
+                        .count(),
                     bomb_amount_2d(dim),
                     "2D dim={dim} bomb count changed"
                 );
@@ -599,8 +609,7 @@ mod tests {
                     continue;
                 }
                 let mut rng = TinyRng::new(safe as u64 + 1);
-                let board =
-                    generate_board_3d_safe(dim, amt, Pos3::new(0, 64, 0), &mut rng, safe);
+                let board = generate_board_3d_safe(dim, amt, Pos3::new(0, 64, 0), &mut rng, safe);
                 assert_eq!(
                     board[safe].content,
                     CellContent::Empty,
@@ -616,8 +625,7 @@ mod tests {
                     continue;
                 }
                 let mut rng = TinyRng::new(safe as u64 + 1);
-                let board =
-                    generate_board_2d_safe(dim, amt, Pos3::new(0, 64, 0), &mut rng, safe);
+                let board = generate_board_2d_safe(dim, amt, Pos3::new(0, 64, 0), &mut rng, safe);
                 assert_eq!(
                     board[safe].content,
                     CellContent::Empty,

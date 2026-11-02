@@ -12,7 +12,7 @@ use crate::{games::NewGameSpec, helpers::uuid_key, state::GameKind};
 
 fn help_text() -> TextComponent {
     TextComponent::text(&format!(
-        "Minesweeper: right-click a starter stick (or /ms <SIZE>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. Lock/unlock with the horse-armor item. Right-click the wool item to cycle flag colors; left-click it to reset to red. /ms clear removes your games. /ms clearnearest (admin) clears the closest board. /ms stats shows your records. /ms infinite teleports to endless mode.",
+        "Minesweeper: right-click a starter stick (or /ms 2d|3d <size>) to start a game at your feet. Sizes: {}. Left-click opens, right-click flags. Sudoku: right-click the Sudoku stick (or /ms sudoku). While near a Sudoku board the hotbar is replaced by digits 1-9: select a digit, right-click a cell to place it, left-click a cell to clear it. Given cells are fixed. Near a minesweeper board the hotbar swaps to just the lock toggle and flag color item; right-click the wool item to cycle flag colors, left-click it to reset to red. /ms clear removes your games. /ms clearnearest (admin) clears the closest board. /ms stats shows your records. /ms infinite teleports to endless mode.",
         crate::games::NewGameSpec::all_labels()
     ))
 }
@@ -106,6 +106,24 @@ impl CommandHandler for NewGame3dCommand {
         args: ConsumedArgs,
     ) -> Result<i32, CommandError> {
         start_sized(&sender, GameKind::ThreeD, &args)
+    }
+}
+
+pub struct SudokuCommand;
+
+impl CommandHandler for SudokuCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        _args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(player) = player_of(&sender) else {
+            sender.send_error(TextComponent::text("Only players can start games."));
+            return Ok(0);
+        };
+        crate::sudoku::create_game(&player);
+        Ok(1)
     }
 }
 
@@ -253,7 +271,9 @@ impl CommandHandler for FloodFillSoundCommand {
 pub struct StatsCommand;
 
 fn spec_label(kind: i64, dim: usize) -> String {
-    if kind == crate::db::KIND_3D {
+    if kind == crate::db::KIND_SUDOKU {
+        "Sudoku".to_string()
+    } else if kind == crate::db::KIND_3D {
         format!("3D {dim}x{dim}x{dim}")
     } else {
         format!("2D {dim}x{dim}")
@@ -309,10 +329,14 @@ impl CommandHandler for StatsCommand {
                 line.push_str(&format!(", avg {avg}s"));
             }
             lines.push(line);
-            lines.push(format!(
-                "  {} opened, {} flags placed, {} bombs",
-                r.opened, r.flags, r.bombs
-            ));
+            if r.kind == crate::db::KIND_SUDOKU {
+                lines.push(format!("  {} cells filled", r.opened));
+            } else {
+                lines.push(format!(
+                    "  {} opened, {} flags placed, {} bombs",
+                    r.opened, r.flags, r.bombs
+                ));
+            }
         }
         let helper = crate::db::helper_record(key);
         if helper.games > 0 {

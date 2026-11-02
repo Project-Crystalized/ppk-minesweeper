@@ -18,6 +18,7 @@ pub const DB_PATH: &str = "data/minesweeper.sql";
 
 pub const KIND_2D: i64 = 0;
 pub const KIND_3D: i64 = 1;
+pub const KIND_SUDOKU: i64 = 2;
 
 pub const OUTCOME_LOSS: i64 = 0;
 pub const OUTCOME_WIN: i64 = 1;
@@ -264,7 +265,11 @@ pub struct GameRecord<'a> {
 }
 
 fn kind_label(kind: i64) -> &'static str {
-    if kind == KIND_3D { "3D" } else { "2D" }
+    match kind {
+        KIND_3D => "3D",
+        KIND_SUDOKU => "Sudoku",
+        _ => "2D",
+    }
 }
 
 fn outcome_label(outcome: i64) -> &'static str {

@@ -1,11 +1,11 @@
 use pumpkin_plugin_api::{
+    Context, Plugin, PluginMetadata,
     command::{Command, CommandNode},
     events::{
         BlockExplodeEvent, CreatureSpawnEvent, EntityExplodeEvent, EventPriority,
         SpawnerSpawnEvent, TrialSpawnerSpawnEvent,
     },
     permission::{Permission, PermissionDefault},
-    Context, Plugin, PluginMetadata,
 };
 use tracing::*;
 
@@ -13,13 +13,15 @@ mod commands;
 mod core;
 mod db;
 mod games;
-mod leaderboard;
-mod sidebar;
 mod helpers;
+mod hotbar;
 mod infinite;
+mod leaderboard;
 mod listeners;
+mod sidebar;
 mod state;
 mod sticks;
+mod sudoku;
 mod tick;
 
 struct MinesweeperPlugin;
@@ -34,7 +36,7 @@ impl Plugin for MinesweeperPlugin {
             name: "Minesweeper".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             authors: vec!["cooltexture1".into()],
-            description: "2D, 3D and infinite minesweeper in survival worlds".into(),
+            description: "2D, 3D, Sudoku and infinite minesweeper in survival worlds".into(),
             dependencies: vec![],
             // Host capability for the SQLite file in the data folder.
             permissions: vec!["fs.write.data".to_string()],
@@ -51,16 +53,8 @@ impl Plugin for MinesweeperPlugin {
         context.register_event_handler(listeners::JoinListener, EventPriority::Normal, false)?;
         context.register_event_handler(listeners::LeaveListener, EventPriority::Normal, true)?;
         context.register_event_handler(listeners::BreakListener, EventPriority::Normal, true)?;
-        context.register_event_handler(
-            listeners::InteractListener,
-            EventPriority::Normal,
-            true,
-        )?;
-        context.register_event_handler(
-            listeners::PlaceListener,
-            EventPriority::Normal,
-            true,
-        )?;
+        context.register_event_handler(listeners::InteractListener, EventPriority::Normal, true)?;
+        context.register_event_handler(listeners::PlaceListener, EventPriority::Normal, true)?;
         context.register_event_handler::<CreatureSpawnEvent, _>(
             listeners::NoMobSpawnListener,
             EventPriority::Normal,
@@ -90,14 +84,19 @@ impl Plugin for MinesweeperPlugin {
         use pumpkin_plugin_api::command::{ArgumentType, StringType};
         let cmd = Command::new(&["ms".to_string()], "Play minesweeper")
             .then(CommandNode::literal("help").execute(commands::HelpCommand))
-            .then(CommandNode::literal("2d").then(
-                CommandNode::argument("size", &ArgumentType::Integer((None, None)))
-                    .execute(commands::NewGame2dCommand),
-            ))
-            .then(CommandNode::literal("3d").then(
-                CommandNode::argument("size", &ArgumentType::Integer((None, None)))
-                    .execute(commands::NewGame3dCommand),
-            ))
+            .then(
+                CommandNode::literal("2d").then(
+                    CommandNode::argument("size", &ArgumentType::Integer((None, None)))
+                        .execute(commands::NewGame2dCommand),
+                ),
+            )
+            .then(
+                CommandNode::literal("3d").then(
+                    CommandNode::argument("size", &ArgumentType::Integer((None, None)))
+                        .execute(commands::NewGame3dCommand),
+                ),
+            )
+            .then(CommandNode::literal("sudoku").execute(commands::SudokuCommand))
             .then(CommandNode::literal("clear").execute(commands::ClearCommand))
             .then(CommandNode::literal("list").execute(commands::ListCommand))
             .then(CommandNode::literal("clearnearest").execute(commands::ClearNearestCommand))
