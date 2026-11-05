@@ -1,5 +1,6 @@
-//! Per-tick driver: a fast 1-tick counter for cooldowns plus the existing
-//! per-second work (game timers, sidebar status, lock cleanup).
+//! Per-tick driver: cooldowns, board timers every tick; the hotbar
+//! proximity swap on a 5-tick cadence; the sidebar/status per-second work
+//! runs on the 20-tick cadence.
 
 use pumpkin_plugin_api::{Context, Server, scheduler::SchedulerExt};
 
@@ -20,15 +21,16 @@ fn tick(server: Server) {
     if crate::leaderboard::take_refresh_request() {
         crate::leaderboard::refresh(&server);
     }
-    if now % 20 != 0 {
-        return;
-    }
 
-    state::prune_flag_locks(now);
+    let per_second = now % 20 == 0;
+    let hotbar_tick = now % crate::hotbar::SYNC_INTERVAL_TICKS == 0;
+    if per_second {
+        state::prune_flag_locks(now);
 
-    // Leaderboard cadence, plus once shortly after load.
-    if now == 40 || now % crate::leaderboard::REFRESH_TICKS == 0 {
-        crate::leaderboard::refresh(&server);
+        // Leaderboard cadence, plus once shortly after load.
+        if now == 40 || now % crate::leaderboard::REFRESH_TICKS == 0 {
+            crate::leaderboard::refresh(&server);
+        }
     }
 
     let players = server.get_all_players();
@@ -39,7 +41,7 @@ fn tick(server: Server) {
         let key = uuid_key(&player);
         let world = player.get_world();
         let infinite = crate::infinite::is_infinite_world(&world);
-        if infinite {
+        if per_second && infinite {
             // Lifetime time in the endless world (1 tick loop = 1 second).
             state::with_session_mut(key, |s| {
                 s.playtime_ticks = s.playtime_ticks.saturating_add(20);
@@ -49,11 +51,14 @@ fn tick(server: Server) {
                 crate::infinite::persist_session_for(key, &player);
             }
         }
-        // Sidebar focus: nearest board in this world; fall back to the
-        // player's own first minesweeper/Sudoku board.
+        // Proximity scan on the 5-tick hotbar cadence: whichever board the
+        // player is closest to within reach decides what their hotbar
+        // becomes (Sudoku digits vs minesweeper lock/flag items); no board
+        // in reach restores the saved kit. (The one-second sidebar pass
+        // below always implies a hotbar tick, so it sees fresh distances.)
         let (px, py, pz) = player.get_position();
         let mut best_mine: Option<(f64, u32)> = None;
-        let mut best_sudoku: Option<(f64, crate::sudoku::Summary)> = None;
+        let mut best_sudoku: Option<f64> = None;
         // Distance to the minesweeper board's bounding box: the utility
         // hotbar should engage while the player is anywhere on/inside a
         // board, not just within radius of its center.
@@ -61,7 +66,8 @@ fn tick(server: Server) {
         let mut mine_first: Option<u32> = None;
         let mut sudoku_first: Option<u32> = None;
         let mut game_count = 0usize;
-        if !infinite {
+        let mut best_sudoku_id: Option<u32> = None;
+        if !infinite && hotbar_tick {
             for g in &games {
                 if g.owner == key {
                     game_count += 1;
@@ -102,41 +108,41 @@ fn tick(server: Server) {
                 let dy = s.center.y as f64 - py;
                 let dz = s.center.z as f64 - pz;
                 let d2 = dx * dx + dy * dy + dz * dz;
-                if best_sudoku.as_ref().is_none_or(|(bd, _)| d2 < *bd) {
-                    best_sudoku = Some((d2, s.clone()));
+                if best_sudoku.is_none_or(|bd| d2 < bd) {
+                    best_sudoku = Some(d2);
+                    best_sudoku_id = Some(s.id);
                 }
             }
         }
-        // Hotbar mode: whichever board the player is closest to within reach
-        // decides what their hotbar becomes (Sudoku digits vs minesweeper
-        // lock/flag items); no board in reach restores the saved kit.
-        let mine_hot = mine_edge_d2.filter(|d| *d <= crate::hotbar::MODE_RADIUS_SQ);
-        let sudoku_hot = best_sudoku
-            .as_ref()
-            .filter(|(ds, _)| *ds <= crate::hotbar::MODE_RADIUS_SQ);
-        let hotbar_mode = match (mine_hot, sudoku_hot) {
-            (Some(dm), Some((ds, _))) => {
-                if *ds < dm {
-                    Some(crate::hotbar::Mode::Sudoku)
-                } else {
-                    Some(crate::hotbar::Mode::Utility)
-                }
-            }
-            (Some(_), None) => Some(crate::hotbar::Mode::Utility),
-            (None, Some(_)) => Some(crate::hotbar::Mode::Sudoku),
-            (None, None) => None,
-        };
-        crate::hotbar::sync(&player, hotbar_mode);
-        let focus = match (best_mine, best_sudoku) {
-            (Some((dm, id)), Some((ds, s))) => {
-                if ds < dm {
-                    Some(crate::sidebar::Focus::Sudoku(s))
+        // Hotbar mode: re-evaluate on the 5-tick cadence so the swap feels
+        // instant while the tick loop stays cheap.
+        if hotbar_tick {
+            let hotbar_mode = crate::hotbar::choose_mode(
+                crate::hotbar::active_mode(&player),
+                mine_edge_d2,
+                best_sudoku,
+            );
+            crate::hotbar::sync(&player, hotbar_mode);
+        }
+
+        if !per_second {
+            continue;
+        }
+        // Sidebar focus: nearest board in this world; fall back to the
+        // player's own first minesweeper/Sudoku board (only runs on the
+        // one-second cadence, so cloning the summary here is fine).
+        let best_sudoku_summary =
+            best_sudoku_id.and_then(|sid| sudoku_games.iter().find(|s| s.id == sid));
+        let focus = match (best_mine, best_sudoku_summary) {
+            (Some((dm, id)), Some(s)) => {
+                if best_sudoku.unwrap_or(f64::MAX) < dm {
+                    Some(crate::sidebar::Focus::Sudoku(s.clone()))
                 } else {
                     Some(crate::sidebar::Focus::Minesweeper(id))
                 }
             }
             (Some((_, id)), None) => Some(crate::sidebar::Focus::Minesweeper(id)),
-            (None, Some((_, s))) => Some(crate::sidebar::Focus::Sudoku(s)),
+            (None, Some(s)) => Some(crate::sidebar::Focus::Sudoku(s.clone())),
             (None, None) => mine_first
                 .map(crate::sidebar::Focus::Minesweeper)
                 .or_else(|| {

@@ -28,7 +28,9 @@ switcher are not part of it. While you are near a minesweeper board, the
 hotbar swaps to just those two items (lock toggle in slot 1, flag color
 switcher in slot 2; sticks are hidden so you can't start a messy board while
 inside one). Entering either board mode saves your whole hotbar; stepping
-away restores it. Lock/unlock with the horse-armor item. Right-click the wool
+away restores it. The swap is re-evaluated every 5 game ticks (worst case
+~250 ms), so it feels instant; a wider drop-off radius keeps the kit from
+flapping when hugging a board edge. Lock/unlock with the horse-armor item. Right-click the wool
 item to cycle through 12 flag colors; left-click it to reset to red. Locked
 games only respond to their owner;
 clicking your own finished board clears it. Boards survive disconnects: the
@@ -45,7 +47,7 @@ Right-click the Sudoku stick (hotbar slot 5) or run `/ms sudoku` to spawn a
 boundaries are drawn with end-rod particles instead of air gaps.
 
 While you are near a Sudoku board, the hotbar is replaced by nine colored
-wool blocks (white, yellow, orange, red, purple, blue, light blue, lime,
+wool blocks (white, yellow, orange, red, magenta, blue, light blue, lime,
 light pink for digits 1-9 - no black, so every digit reads as a
 different color). The cells the board comes prefilled with use the same
 colors as smooth **concrete** instead, so fixed givens always read as part

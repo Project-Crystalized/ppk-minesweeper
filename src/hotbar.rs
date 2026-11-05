@@ -23,6 +23,15 @@ use crate::{
 /// worst-case vertical drop.
 pub const MODE_RADIUS_SQ: f64 = 14.0 * 14.0;
 
+/// Players already inside a mode leave it at this larger radius, so walking
+/// exactly along the movement boundary does not flip the kit back and
+/// forth every tick.
+pub const MODE_EXIT_RADIUS_SQ: f64 = 16.0 * 16.0;
+
+/// Run the hotbar proximity scan every N ticks (N = 5 -> worst-case 250 ms
+/// reaction time) instead of every tick, keeping the tick loop cheap.
+pub const SYNC_INTERVAL_TICKS: u64 = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Nine colored wool digit blocks in slots 1-9.
@@ -166,4 +175,90 @@ pub fn in_mode(player: &Player, kind: Mode) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .get(&uuid_key(player))
         .is_some_and(|state| state.kind == kind)
+}
+
+/// Which mode (if any) is the player in right now?
+pub fn active_mode(player: &Player) -> Option<Mode> {
+    modes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&uuid_key(player))
+        .map(|state| state.kind)
+}
+
+/// Pick the active board mode from the two board distances (squared, to
+/// the nearest minesweeper board edge and Sudoklu board center). The mode
+/// the player is already in gets the wider exit radius so kits do not
+/// flap at the movement boundary; with both boards in range, the closer
+/// one wins (ties go to minesweeper, matching the sidebar focus).
+pub fn choose_mode(
+    current: Option<Mode>,
+    mine_d2: Option<f64>,
+    sudoku_d2: Option<f64>,
+) -> Option<Mode> {
+    let (mine_limit, sudoku_limit) = match current {
+        Some(Mode::Utility) => (MODE_EXIT_RADIUS_SQ, MODE_RADIUS_SQ),
+        Some(Mode::Sudoku) => (MODE_RADIUS_SQ, MODE_EXIT_RADIUS_SQ),
+        None => (MODE_RADIUS_SQ, MODE_RADIUS_SQ),
+    };
+    let mine_hot = mine_d2.filter(|d| *d <= mine_limit);
+    let sudoku_hot = sudoku_d2.filter(|d| *d <= sudoku_limit);
+    match (mine_hot, sudoku_hot) {
+        (Some(dm), Some(ds)) => {
+            if ds < dm {
+                Some(Mode::Sudoku)
+            } else {
+                Some(Mode::Utility)
+            }
+        }
+        (Some(_), None) => Some(Mode::Utility),
+        (_, Some(_)) => Some(Mode::Sudoku),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(blocks: f64) -> f64 {
+        blocks.powi(2)
+    }
+
+    #[test]
+    fn choose_mode_follows_the_closest_board() {
+        // Nothing in range.
+        assert_eq!(choose_mode(None, Some(r(30.0)), Some(r(30.0))), None);
+        // Single candidates.
+        assert_eq!(choose_mode(None, Some(r(5.0)), None), Some(Mode::Utility));
+        assert_eq!(choose_mode(None, None, Some(r(5.0))), Some(Mode::Sudoku));
+        // Both in range: the closer one wins, ties go to minesweeper.
+        assert_eq!(
+            choose_mode(None, Some(r(10.0)), Some(r(5.0))),
+            Some(Mode::Sudoku)
+        );
+        assert_eq!(
+            choose_mode(None, Some(r(5.0)), Some(r(5.0))),
+            Some(Mode::Utility)
+        );
+    }
+
+    #[test]
+    fn current_mode_gets_the_wider_exit_radius() {
+        // Standing in the hysteresis band (past the entry radius, inside the
+        // exit radius) keeps the mode instead of flapping.
+        let band = 15.0_f64.powi(2);
+        assert_eq!(
+            choose_mode(Some(Mode::Utility), Some(band), None),
+            Some(Mode::Utility)
+        );
+        assert_eq!(
+            choose_mode(Some(Mode::Sudoku), None, Some(band)),
+            Some(Mode::Sudoku)
+        );
+        // From outside no mode the band is still out of reach.
+        assert_eq!(choose_mode(None, Some(band), None), None);
+        // Past the exit radius the mode is dropped even with hysteresis.
+        assert_eq!(choose_mode(Some(Mode::Utility), Some(r(20.0)), None), None);
+    }
 }
