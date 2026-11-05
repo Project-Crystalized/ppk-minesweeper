@@ -212,15 +212,35 @@ fn game_lines(id: u32, game_count: usize) -> Option<Vec<String>> {
 
 fn infinite_lines(player: &Player) -> Vec<String> {
     let s = state::session(uuid_key(player)).unwrap_or_default();
+    // Streak color tiers; the line is bordered by obfuscated runes past a
+    // streak of 1000 (was the actionbar HUD, now lives on the scoreboard).
+    let code = streak_color(s.current_streak);
+    let streak = if s.current_streak > 1000 {
+        format!("§ka{code}Streak: §f{}§r §ka§r", s.current_streak)
+    } else {
+        format!("{code}Streak: §f{}", s.current_streak)
+    };
     vec![
         "§dInfinite".to_string(),
-        format!("§eStreak: §f{}", s.current_streak),
+        streak,
         format!(
             "§7Best: §f{} §8| §7Opened: §f{}",
             s.top_streak, s.total_opened
         ),
         format!("§cBombs hit: §f{}", s.bombs_clicked),
     ]
+}
+
+fn streak_color(streak: usize) -> &'static str {
+    match streak {
+        0..=50 => "§7",
+        51..=150 => "§a",
+        151..=300 => "§9",
+        301..=500 => "§1",
+        501..=1000 => "§c",
+        1001..=2000 => "§4",
+        _ => "§6",
+    }
 }
 
 fn spec_label(kind: state::GameKind, dim: usize) -> String {

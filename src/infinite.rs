@@ -260,7 +260,6 @@ pub fn handle_break(
             });
             persist_session(key, player);
             tell(player, "You clicked a bomb, streak reset!");
-            overlay(player, key);
             true
         }
         Outcome::Opened(n) => {
@@ -272,7 +271,8 @@ pub fn handle_break(
                 (before, s.current_streak)
             });
             persist_session(key, player);
-            overlay(player, key);
+            // Streak feedback lives on the sidebar (the proxy broadcasts
+            // actionbar text); milestones are announced in chat below.
             if let Some(milestone) = crossed_milestone(before, after) {
                 let name = player.get_name();
                 for p in server.get_all_players() {
@@ -433,32 +433,4 @@ mod tests {
         assert_eq!(crossed_milestone(0, 3000), Some(1000));
         assert_eq!(crossed_milestone(1000, 1200), None);
     }
-}
-
-fn overlay(player: &Player, key: crate::state::UuidKey) {
-    use pumpkin_plugin_api::text::TextComponent;
-    state::with_session_mut(key, |s| {
-        // Streak colors, obfuscated past 1000.
-        let code = match s.current_streak {
-            0..=50 => "§7",
-            51..=150 => "§a",
-            151..=300 => "§9",
-            301..=500 => "§1",
-            501..=1000 => "§c",
-            1001..=2000 => "§4",
-            _ => "§6",
-        };
-        let body = if s.current_streak > 1000 {
-            format!(
-                "§ka {code}Streak: {}  Best: {}  Opened: {}§r §ka§r",
-                s.current_streak, s.top_streak, s.total_opened
-            )
-        } else {
-            format!(
-                "{code}Streak: {}  Best: {}  Opened: {}",
-                s.current_streak, s.top_streak, s.total_opened
-            )
-        };
-        crate::helpers::action_bar_component(player, TextComponent::from_legacy_string(&body));
-    });
 }

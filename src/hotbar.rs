@@ -13,10 +13,7 @@ use std::{
 
 use pumpkin_plugin_api::{ItemStack, ItemStackExt, Player, text::TextComponent};
 
-use crate::{
-    helpers::{action_bar_component, uuid_key},
-    state::UuidKey,
-};
+use crate::{helpers::uuid_key, state::UuidKey};
 
 /// The hotbar swaps when the player is this close to a board (squared
 /// distance, to avoid a square root in the tick loop). Sudoku boards can
@@ -40,17 +37,6 @@ pub enum Mode {
     /// Just the lock toggle (slot 1) and flag color item (slot 2): no
     /// starter sticks while standing at a minesweeper board.
     Utility,
-}
-
-impl Mode {
-    fn message(self) -> &'static str {
-        match self {
-            Self::Sudoku => "Sudoku mode: select 1-9, right-click to place, left-click to clear",
-            Self::Utility => {
-                "Minesweeper mode: sticks swapped for lock/flag; step away to restore your kit"
-            }
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -141,7 +127,6 @@ pub fn sync(player: &Player, mode: Option<Mode>) {
             };
             if changed {
                 apply_mode(player, kind);
-                action_bar_component(player, TextComponent::text(kind.message()));
             }
         }
         None => leave(player),

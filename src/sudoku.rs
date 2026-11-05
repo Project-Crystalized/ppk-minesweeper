@@ -11,7 +11,7 @@ use pumpkin_plugin_api::{
 
 use crate::{
     core::{Pos3, TinyRng},
-    helpers::{self, BulkWriter, Sound, action_bar_component, is_air, play_sound, tell},
+    helpers::{self, BulkWriter, Sound, is_air, play_sound, tell},
     state::{self, MAX_BUILD_Y, MAX_GAMES_PER_PLAYER, MIN_BUILD_Y, UuidKey},
 };
 
@@ -664,10 +664,6 @@ pub fn create_game(player: &Player) {
             id, origin.x, origin.y, origin.z, SUDOKU_CELLS
         ),
     );
-    action_bar_component(
-        player,
-        TextComponent::text(&format!("Sudoku #{id}: 0/{SUDOKU_CELLS} filled")),
-    );
 }
 
 fn render_cell(world: &World, pos: Pos3, value: u8) {
@@ -729,22 +725,6 @@ fn time_text(ticks: u64) -> String {
     }
 }
 
-fn show_progress(player: &Player, id: u32, conflict: bool) {
-    if let Some((filled, any_conflict)) = with_game(id, |g| (g.filled_count(), g.has_conflict())) {
-        let suffix = if conflict || any_conflict {
-            " (conflict)"
-        } else {
-            ""
-        };
-        action_bar_component(
-            player,
-            TextComponent::text(&format!(
-                "Sudoku #{id}: {filled}/{SUDOKU_CELLS} filled{suffix}"
-            )),
-        );
-    }
-}
-
 fn hotbar_item(digit: u8) -> ItemStack {
     let stack = ItemStack::of(placed_block(digit), 1);
     stack.set_custom_name(Some(TextComponent::text(&digit.to_string())));
@@ -777,10 +757,7 @@ pub fn click_left(world: &World, player: &Player, id: u32, idx: usize) -> bool {
 pub fn click_right(world: &World, player: &Player, id: u32, idx: usize) -> bool {
     crate::hotbar::sync(player, Some(crate::hotbar::Mode::Sudoku));
     let Some(digit) = selected_digit(player) else {
-        action_bar_component(
-            player,
-            TextComponent::text("Sudoku hotbar is not ready; step away and back."),
-        );
+        tell(player, "Sudoku hotbar is not ready; step away and back.");
         return true;
     };
     place(world, player, id, idx, digit)
@@ -844,6 +821,9 @@ fn place(world: &World, player: &Player, id: u32, idx: usize, value: u8) -> bool
             game.is_won = true;
             Outcome::Won
         } else if has_conflict(&game.cells, idx) {
+            // No actionbar feedback (the proxy broadcasts actionbar text) -
+            // a dull low-pitched thud marks the conflicting placement.
+            helpers::play_named_sound_pitched(world, pos, "block.note_block.bass", 0.6);
             Outcome::Conflict
         } else {
             Outcome::Played
@@ -853,9 +833,6 @@ fn place(world: &World, player: &Player, id: u32, idx: usize, value: u8) -> bool
     match outcome {
         Some(Outcome::Locked) => {
             tell(player, "That Sudoku game is locked by its owner.");
-        }
-        Some(Outcome::Given) => {
-            action_bar_component(player, TextComponent::text("Given cell - fixed"));
         }
         Some(Outcome::Finished) => {
             tell(player, "That Sudoku game is already finished.");
@@ -873,9 +850,9 @@ fn place(world: &World, player: &Player, id: u32, idx: usize, value: u8) -> bool
                 );
             }
         }
-        Some(Outcome::Conflict) => show_progress(player, id, true),
-        Some(Outcome::Played) => show_progress(player, id, false),
-        Some(Outcome::Swallowed) | None => {}
+        // Placed/played/conflict/given cells report through the sidebar
+        // progress, sounds, and the visible block, not through text.
+        _ => {}
     }
     true
 }

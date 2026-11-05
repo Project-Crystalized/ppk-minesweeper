@@ -190,10 +190,6 @@ pub fn tell(player: &Player, text: &str) {
     player.send_system_message(msg(text), false);
 }
 
-pub fn action_bar_component(player: &Player, comp: TextComponent) {
-    player.send_system_message(comp, true);
-}
-
 /// Minecraft fades positional sounds out at roughly `volume * 16` blocks, so
 /// 1.25 keeps feedback audible to nearby players without carrying across the
 /// whole area.
@@ -222,6 +218,10 @@ fn play_named_sound_at(world: &World, pos: Pos3, name: &str, volume: f32) {
 /// which traps, so this uses dotted custom sound names instead.
 pub fn play_named_sound(world: &World, pos: Pos3, name: &str) {
     play_named_sound_at(world, pos, name, SOUND_VOLUME);
+}
+
+pub fn play_named_sound_pitched(world: &World, pos: Pos3, name: &str, pitch: f32) {
+    play_named_sound_at_pitched(world, pos, name, SOUND_VOLUME, pitch);
 }
 
 pub fn play_sound(world: &World, pos: Pos3, sound: Sound) {
