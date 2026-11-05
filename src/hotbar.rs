@@ -3,7 +3,8 @@
 //! nine digit blocks near a Sudoku board, and just the lock/flag utility
 //! items near a minesweeper board. Entering any mode saves the player's
 //! whole hotbar once, switching modes swaps the items, and leaving every
-//! mode restores the saved kit.
+//! mode restores the saved kit. (The endless infinite world instead has a
+//! plain kit handed out on teleport/join - see `sticks::apply_infinite_items`.)
 
 use std::{
     collections::HashMap,

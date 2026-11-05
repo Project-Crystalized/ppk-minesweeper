@@ -115,7 +115,9 @@ fn tick(server: Server) {
             }
         }
         // Hotbar mode: re-evaluate on the 5-tick cadence so the swap feels
-        // instant while the tick loop stays cheap.
+        // instant while the tick loop stays cheap. (The endless infinite
+        // world has its own plain kit, handed out on teleport/join, so it
+        // needs no proximity scan here.)
         if hotbar_tick {
             let hotbar_mode = crate::hotbar::choose_mode(
                 crate::hotbar::active_mode(&player),

@@ -15,6 +15,8 @@ pub const LOCKED_NAME: &str = "Game is Locked";
 pub const UNLOCKED_NAME: &str = "Game is Unlocked";
 pub const FLAG_SWITCH_NAME: &str = "Switch flag color";
 pub const SUDOKU_NAME: &str = "Sudoku";
+pub const INFINITE_NAME: &str = "Infinite Minesweeper";
+pub const INFINITE_RETURN_NAME: &str = "Leave infinite minesweeper";
 
 pub enum HeldSpecial {
     LockToggle,
@@ -43,6 +45,13 @@ pub fn is_sudoku_stick(stack: &ItemStack) -> bool {
         && stack
             .get_custom_name()
             .is_some_and(|name| name.get_text() == SUDOKU_NAME)
+}
+
+pub fn is_infinite_stick(stack: &ItemStack) -> bool {
+    stack.matches_item("stick")
+        && stack
+            .get_custom_name()
+            .is_some_and(|name| name.get_text() == INFINITE_NAME)
 }
 
 pub fn special_for(stack: &ItemStack) -> Option<HeldSpecial> {
@@ -115,20 +124,48 @@ pub fn held_sudoku(player: &Player) -> bool {
         .any(|stack| is_sudoku_stick(&stack))
 }
 
+pub fn held_infinite(player: &Player) -> bool {
+    [Hand::Right, Hand::Left]
+        .into_iter()
+        .filter_map(|hand| player.get_item_in_hand(hand))
+        .any(|stack| is_infinite_stick(&stack))
+}
+
+pub fn is_return_stick(stack: &ItemStack) -> bool {
+    stack.matches_item("stick")
+        && stack
+            .get_custom_name()
+            .is_some_and(|name| name.get_text() == INFINITE_RETURN_NAME)
+}
+
+pub fn held_return(player: &Player) -> bool {
+    [Hand::Right, Hand::Left]
+        .into_iter()
+        .filter_map(|hand| player.get_item_in_hand(hand))
+        .any(|stack| is_return_stick(&stack))
+}
+
 pub const OFFHAND_SLOT: u8 = 40;
 const SUDOKU_SLOT: u8 = 4;
+const INFINITE_SLOT: u8 = 5;
 pub const UTILITY_LOCK_SLOT: u8 = 7;
 pub const UTILITY_FLAG_SLOT: u8 = 8;
+/// Infinite-world kit layout: flag color switcher in slot 8, the return
+/// stick right after it in slot 9.
+pub const INFINITE_FLAG_SLOT: u8 = 7;
+pub const INFINITE_RETURN_SLOT: u8 = 8;
 
 /// The default kit: only the starter sticks. Sticks for the four
-/// minesweeper sizes in slots 0-3, Sudoku in slot 4.
-fn kit_layout() -> [(u8, ItemStack); 5] {
+/// minesweeper sizes in slots 0-3, Sudoku in slot 4, the infinite-mode
+/// portal stick in slot 5.
+fn kit_layout() -> [(u8, ItemStack); 6] {
     [
         (0, make_stick(STARTERS[0].0)),
         (1, make_stick(STARTERS[1].0)),
         (2, make_stick(STARTERS[2].0)),
         (3, make_stick(STARTERS[3].0)),
         (SUDOKU_SLOT, make_stick(SUDOKU_NAME)),
+        (INFINITE_SLOT, make_stick(INFINITE_NAME)),
     ]
 }
 
@@ -165,6 +202,23 @@ pub fn apply_utility_items(player: &Player) {
         UTILITY_FLAG_SLOT,
         Some(make_flag_item(crate::state::flag_block_for(key))),
     );
+}
+
+/// The plain kit for the endless infinite world: the flag color switcher
+/// (slot 8) plus a return stick (slot 9), hotbar wiped. Handed out directly
+/// on teleport/join - there is no save/restore here; both directions always
+/// give a fresh kit for wherever the player ended up.
+pub fn apply_infinite_items(player: &Player) {
+    for slot in 0..9u8 {
+        player.set_inventory_item(slot, None);
+    }
+    player.set_inventory_item(
+        INFINITE_FLAG_SLOT,
+        Some(make_flag_item(crate::state::flag_block_for(
+            crate::helpers::uuid_key(player),
+        ))),
+    );
+    player.set_inventory_item(INFINITE_RETURN_SLOT, Some(make_stick(INFINITE_RETURN_NAME)));
 }
 
 /// Update the hotbar utility item names to the current lock state/flag color.

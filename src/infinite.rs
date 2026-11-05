@@ -13,8 +13,8 @@ use pumpkin_plugin_api::{
 use crate::{
     core::{COVERED_BLOCK, CellContent, Pos3, infinite_is_bomb, infinite_number_at},
     helpers::{
-        Sound, block_is, block_name, is_air, play_bomb, play_open_cascade, play_open_strong,
-        play_sound, set_block, set_tile, tell, to_block_pos, uuid_key,
+        Sound, block_is, block_name, play_bomb, play_open_cascade, play_open_strong, play_sound,
+        set_block, set_tile, tell, to_block_pos, uuid_key,
     },
     state,
 };
@@ -131,19 +131,55 @@ fn content_at(x: i32, z: i32) -> CellContent {
 }
 
 pub fn teleport_here(player: &Player, server: &Server) {
+    // The infinite world has its own plain kit: drop any saved board-mode
+    // hotbar, teleport to the world spawn, hand the kit out.
+    crate::hotbar::leave(player);
     let world = ensure_world(server);
-    let top = world.get_top_block_y(8, 8);
-    let ty = (top + 1).max(BOARD_Y + 1);
-    tracing::info!("infinite: teleport to 8.5, {ty}, 8.5 (top={top})");
-    let pad = Pos3::new(8, BOARD_Y, 8);
-    if is_air(&world, pad) {
-        set_block(&world, pad, COVERED_BLOCK);
-    }
-    player.teleport((8.5, ty as f64, 8.5), None, None, world);
+    let spawn = world.get_spawn_location();
+    // Never land inside the play layer: cells are painted up to BOARD_Y.
+    let y = spawn.pos.y.max(BOARD_Y + 1) as f64;
+    player.teleport(
+        (spawn.pos.x as f64 + 0.5, y, spawn.pos.z as f64 + 0.5),
+        Some(spawn.yaw),
+        Some(spawn.pitch),
+        world,
+    );
+    crate::sticks::apply_infinite_items(player);
     tell(
         player,
-        "Welcome to infinite minesweeper! Open cells, avoid TNT.",
+        "Welcome to infinite minesweeper! Open cells, avoid TNT. Right-click the wool to change flag colors; the stick in slot 9 returns to the default world.",
     );
+}
+
+/// Teleport to the default world's spawn and hand out the regular kit
+/// again. No trying to return to where the player came from - kits are
+/// plain, nothing is saved or restored.
+pub fn teleport_back(player: &Player, server: &Server) {
+    crate::hotbar::leave(player);
+    let world = match server.get_world_by_name("minecraft:overworld") {
+        Some(world) => Some(world),
+        None => server
+            .get_all_worlds()
+            .into_iter()
+            .find(|w| !is_infinite_world(w)),
+    };
+    let Some(world) = world else {
+        tell(player, "Could not find a world to return to.");
+        return;
+    };
+    let spawn = world.get_spawn_location();
+    player.teleport(
+        (
+            spawn.pos.x as f64 + 0.5,
+            spawn.pos.y.max(1) as f64,
+            spawn.pos.z as f64 + 0.5,
+        ),
+        Some(spawn.yaw),
+        Some(spawn.pitch),
+        world,
+    );
+    crate::sticks::give_fresh_kit(player);
+    tell(player, "Back from infinite minesweeper.");
 }
 
 /// Left-click in the infinite world. Returns true if intercepted.

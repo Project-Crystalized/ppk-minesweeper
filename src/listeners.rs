@@ -30,9 +30,14 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
         _server: Server,
         event: EventData<PlayerJoinEvent>,
     ) -> EventData<PlayerJoinEvent> {
-        // Fresh kit: wipe stale slots, then lay out the sticks-only kit.
+        // Fresh kit: wipe stale slots, then lay out a kit. Inside the
+        // endless world that is its plain kit; anywhere else the sticks.
         crate::hotbar::forget(crate::helpers::uuid_key(&event.player));
-        crate::sticks::give_fresh_kit(&event.player);
+        if crate::infinite::is_infinite_world(&event.player.get_world()) {
+            crate::sticks::apply_infinite_items(&event.player);
+        } else {
+            crate::sticks::give_fresh_kit(&event.player);
+        }
         crate::state::mark_join(crate::helpers::uuid_key(&event.player));
         crate::db::touch_player(
             crate::helpers::uuid_key(&event.player),
@@ -49,7 +54,7 @@ impl EventHandler<PlayerJoinEvent> for JoinListener {
         crate::infinite::hydrate_session(&event.player);
         tell(
             &event.player,
-            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-5 and right-click to play (slot 5 is Sudoku), or /ms help. Near one of your boards the hotbar swaps to the lock and flag color items. Right-click the wool it gives you to cycle flag colors; left-click it to reset to red. Building, breaking and mob spawning are disabled.",
+            "Minesweeper is installed! Starter sticks are in your hotbar - press 1-6 and right-click to play (slot 5 is Sudoku, slot 6 goes to infinite minesweeper, where your kit becomes the flag-color wool and a return stick), or /ms help. Near one of your boards the hotbar swaps to the lock and flag color items. Right-click the wool it gives you to cycle flag colors; left-click it to reset to red. Building, breaking and mob spawning are disabled.",
         );
         event
     }
@@ -137,7 +142,7 @@ pub struct InteractListener;
 impl EventHandler<PlayerInteractEvent> for InteractListener {
     fn handle(
         &self,
-        _server: Server,
+        server: Server,
         mut event: EventData<PlayerInteractEvent>,
     ) -> EventData<PlayerInteractEvent> {
         let is_left_click = event.action == InteractAction::LeftClickBlock
@@ -218,6 +223,20 @@ impl EventHandler<PlayerInteractEvent> for InteractListener {
         // Starter sticks win over flagging.
         if let Some(spec) = crate::sticks::held_starter(&event.player) {
             crate::games::create_game(&event.player, spec);
+            event.cancelled = true;
+            return event;
+        }
+        // Infinite portal stick: right-click (block or air) teleports to the
+        // endless world.
+        if crate::sticks::held_infinite(&event.player) {
+            crate::infinite::teleport_here(&event.player, &server);
+            event.cancelled = true;
+            return event;
+        }
+        // Return stick (infinite-world kit): right-click teleports to the
+        // default world spawn; teleport_back hands the regular kit out.
+        if crate::sticks::held_return(&event.player) {
+            crate::infinite::teleport_back(&event.player, &server);
             event.cancelled = true;
             return event;
         }
