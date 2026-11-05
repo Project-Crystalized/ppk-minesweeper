@@ -394,7 +394,7 @@ fn count_solutions_from(
     let (row, col, box_idx) = cell_units(idx);
     let mut cands = best_cands;
     while cands != 0 && *count < cap {
-        let bit = cands.isolate_lowest_one();
+        let bit = cands & cands.wrapping_neg();
         cands ^= bit;
         // Write the digit into the working grid (MRV relies on it from this
         // depth on), recurse, then take it back out.
