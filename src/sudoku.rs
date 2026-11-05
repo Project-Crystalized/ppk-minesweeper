@@ -540,21 +540,36 @@ fn seed_now(owner: UuidKey) -> u64 {
     nanos ^ owner.0 ^ owner.1
 }
 
-/// Concrete palette for digits 1-9, chosen so no two digits look alike:
-/// warm hues (yellow/orange/red), pink (magenta), a pale pink, one dark
-/// blue, one teal (cyan) and a bright green (lime).
-/// Purple is deliberately skipped because it blurs into the dark blue, and
-/// black is excluded entirely. Moss (empty cells) is deliberately not part
-/// of this palette either, so empty/blank cells stay visually distinct.
-pub fn concrete_block(digit: u8) -> &'static str {
+/// Blocks a player places: wool in the same nine hues as the concrete
+/// givens. Wool's bold, fuzzy look is chosen so placed digits always read
+/// as "player moves" against the smoother concrete given cells.
+pub fn placed_block(digit: u8) -> &'static str {
+    match digit {
+        1 => "minecraft:white_wool",
+        2 => "minecraft:yellow_wool",
+        3 => "minecraft:orange_wool",
+        4 => "minecraft:red_wool",
+        5 => "minecraft:purple_wool",
+        6 => "minecraft:blue_wool",
+        7 => "minecraft:light_blue_wool",
+        8 => "minecraft:lime_wool",
+        9 => "minecraft:pink_wool",
+        _ => SUDOKU_EMPTY_BLOCK,
+    }
+}
+
+/// Digits the board came prefilled with. Same hue as `placed_block`, but
+/// the plain concrete texture family, so given cells always read as
+/// "printed on the board" while every digit a player drops is colored wool.
+pub fn given_block(digit: u8) -> &'static str {
     match digit {
         1 => "minecraft:white_concrete",
         2 => "minecraft:yellow_concrete",
         3 => "minecraft:orange_concrete",
         4 => "minecraft:red_concrete",
-        5 => "minecraft:magenta_concrete",
+        5 => "minecraft:purple_concrete",
         6 => "minecraft:blue_concrete",
-        7 => "minecraft:cyan_concrete",
+        7 => "minecraft:light_blue_concrete",
         8 => "minecraft:lime_concrete",
         9 => "minecraft:pink_concrete",
         _ => SUDOKU_EMPTY_BLOCK,
@@ -613,7 +628,7 @@ pub fn create_game(player: &Player) {
             if cell.value == 0 {
                 SUDOKU_EMPTY_BLOCK
             } else {
-                concrete_block(cell.value)
+                given_block(cell.value)
             },
         );
     }
@@ -659,7 +674,7 @@ fn render_cell(world: &World, pos: Pos3, value: u8) {
     if value == 0 {
         helpers::set_block(world, pos, SUDOKU_EMPTY_BLOCK);
     } else {
-        helpers::set_block(world, pos, concrete_block(value));
+        helpers::set_block(world, pos, placed_block(value));
     }
 }
 
@@ -731,10 +746,10 @@ fn show_progress(player: &Player, id: u32, conflict: bool) {
 }
 
 fn hotbar_item(digit: u8) -> ItemStack {
-    let stack = ItemStack::of(concrete_block(digit), 1);
+    let stack = ItemStack::of(placed_block(digit), 1);
     stack.set_custom_name(Some(TextComponent::text(&digit.to_string())));
     stack.set_lore(vec![
-        TextComponent::text(&format!("Sudoku digit {digit} - colored concrete")),
+        TextComponent::text(&format!("Sudoku digit {digit} - colored wool")),
         TextComponent::text("Right-click a cell to place"),
         TextComponent::text("Left-click a cell to clear"),
     ]);
@@ -1285,27 +1300,40 @@ mod tests {
     }
 
     #[test]
-    fn concrete_palette_has_nine_distinct_non_moss_blocks() {
+    fn placed_palette_has_nine_distinct_wool_blocks() {
         let expected = [
-            "minecraft:white_concrete",
-            "minecraft:yellow_concrete",
-            "minecraft:orange_concrete",
-            "minecraft:red_concrete",
-            "minecraft:magenta_concrete",
-            "minecraft:blue_concrete",
-            "minecraft:cyan_concrete",
-            "minecraft:lime_concrete",
-            "minecraft:pink_concrete",
+            "minecraft:white_wool",
+            "minecraft:yellow_wool",
+            "minecraft:orange_wool",
+            "minecraft:red_wool",
+            "minecraft:purple_wool",
+            "minecraft:blue_wool",
+            "minecraft:light_blue_wool",
+            "minecraft:lime_wool",
+            "minecraft:pink_wool",
         ];
-        let blocks: Vec<&str> = (1..=9).map(concrete_block).collect();
+        let blocks: Vec<&str> = (1..=9).map(placed_block).collect();
         assert_eq!(blocks, expected);
-        // No duplicate hues and never the moss empty-cell block.
+        // No duplicate hues and never the empty-cell block.
         for (i, block) in blocks.iter().enumerate() {
             assert_ne!(*block, SUDOKU_EMPTY_BLOCK);
             assert!(!blocks[..i].contains(block));
         }
-        // Definitely no black, and the hated purple/dark-blue pairing is gone.
-        assert!(!blocks.contains(&"minecraft:black_concrete"));
-        assert!(!blocks.contains(&"minecraft:purple_concrete"));
+        // Definitely no black.
+        assert!(!blocks.contains(&"minecraft:black_wool"));
+    }
+
+    #[test]
+    fn given_blocks_are_concrete_twin_of_the_placed_palette() {
+        for digit in 1..=9u8 {
+            let placed = placed_block(digit).strip_suffix("_wool").unwrap();
+            let given = given_block(digit).strip_suffix("_concrete").unwrap();
+            assert_eq!(placed, given, "digit {digit} color mismatch");
+            assert_ne!(given_block(digit), SUDOKU_EMPTY_BLOCK);
+        }
+        let given: Vec<&str> = (1..=9).map(given_block).collect();
+        for (i, block) in given.iter().enumerate() {
+            assert!(!given[..i].contains(block));
+        }
     }
 }

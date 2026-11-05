@@ -25,7 +25,7 @@ pub const MODE_RADIUS_SQ: f64 = 14.0 * 14.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Nine colored concrete digit blocks in slots 1-9.
+    /// Nine colored wool digit blocks in slots 1-9.
     Sudoku,
     /// Just the lock toggle (slot 1) and flag color item (slot 2): no
     /// starter sticks while standing at a minesweeper board.

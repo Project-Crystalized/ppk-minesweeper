@@ -45,9 +45,12 @@ Right-click the Sudoku stick (hotbar slot 5) or run `/ms sudoku` to spawn a
 boundaries are drawn with end-rod particles instead of air gaps.
 
 While you are near a Sudoku board, the hotbar is replaced by nine colored
-concrete blocks (white, yellow, orange, red, magenta, blue, cyan, lime,
-light pink for digits 1-9 - no purple or black, so every digit reads as a
-different color - and the same blocks the board uses for givens). Select slot
+wool blocks (white, yellow, orange, red, purple, blue, light blue, lime,
+light pink for digits 1-9 - no black, so every digit reads as a
+different color). The cells the board comes prefilled with use the same
+colors as smooth **concrete** instead, so fixed givens always read as part
+of the board while every digit a player places stays colored wool - the same
+blocks the hotbar uses. Select slot
 1-9, then right-click an editable cell to place that digit; left-click a cell
 to clear it. Fixed givens cannot be changed. Leaving the board restores your
 previous hotbar/kit. The sidebar shows filled-cell progress, and the board is
